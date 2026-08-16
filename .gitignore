@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+runtime/
+results/
+outputs/
+logs/
+*.pt
+*.zip
+*.log
+.ipynb_checkpoints/
