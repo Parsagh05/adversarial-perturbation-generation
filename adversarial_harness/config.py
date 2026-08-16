@@ -1,4 +1,4 @@
-"""Typed configuration for the adversarial robustness benchmark."""
+"""Typed configuration for adversarial perturbation generation."""
 
 from __future__ import annotations
 

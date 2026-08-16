@@ -7,8 +7,7 @@ it cannot silently reuse or overwrite the original Kaggle dataset.
 
 This project is self-contained: its local `adversarial_harness/` package owns
 the attack, configuration, dataset, CLIP adapter, and prompt code required by
-the generator. It does not import from `full_attack_generation_pipeline` or
-`blackbox_evaluation_pipeline`.
+the generator.
 
 ## Local objective
 
