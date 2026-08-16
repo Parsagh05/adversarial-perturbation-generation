@@ -6,7 +6,7 @@ local MVTec AD and VisA dataset directories.
 ```bash
 git clone https://github.com/Parsagh05/adversarial-perturbation-generation.git
 cd adversarial-perturbation-generation
-git checkout 806ddfc515ca597457ef1b0a39b982256d2f23af
+git checkout ff874e6ac7cb0b9e16e73048503e9099271f1121
 ```
 
 Install a CUDA-compatible PyTorch build first. `train.sh` installs the remaining
