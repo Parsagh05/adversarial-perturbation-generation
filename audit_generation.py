@@ -10,20 +10,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from setup_catalog import SETUPS
+
 
 ROOT = Path(os.environ["OUTPUT_BASE"]).expanduser().resolve()
 RUN_SETUPS = os.environ.get("RUN_SETUPS", "all")
+PROMPT_SETUP = os.environ.get("PROMPT_SETUP", "both").strip().lower()
 SMOKE = os.environ.get("SMOKE_TEST", "false").lower() in {
     "1", "true", "yes", "on"
 }
 SMOKE_STEPS = int(os.environ.get("SMOKE_STEPS", "2"))
 
-SETUPS = {
-    "steps500_eps2": (500, 2 / 255),
-    "steps500_eps4": (500, 4 / 255),
-    "steps800_eps2": (800, 2 / 255),
-    "steps800_eps4": (800, 4 / 255),
-}
 SCOPES = {
     "dataset": (
         os.environ.get("RUN_PER_DATASET", "true"),
@@ -45,9 +42,27 @@ def enabled(raw: str) -> bool:
 
 
 def selected_setups() -> list[str]:
-    if RUN_SETUPS == "all":
-        return list(SETUPS)
-    return [value.strip() for value in RUN_SETUPS.split(",") if value.strip()]
+    requested_ids = (
+        set(SETUPS)
+        if RUN_SETUPS == "all"
+        else {value.strip() for value in RUN_SETUPS.split(",") if value.strip()}
+    )
+    if PROMPT_SETUP not in {"frozen", "learnable", "both"}:
+        raise ValueError(f"Unknown PROMPT_SETUP: {PROMPT_SETUP}")
+    expected_modes = {
+        "frozen": {"frozen_winclip"},
+        "learnable": {"learnable_object_agnostic"},
+        "both": {"frozen_winclip", "learnable_object_agnostic"},
+    }[PROMPT_SETUP]
+    return [
+        setup_id
+        for setup_id, setup in SETUPS.items()
+        if setup.prompt_mode in expected_modes
+        and (
+            setup_id in requested_ids
+            or setup_id.removesuffix("_learnable_prompt") in requested_ids
+        )
+    ]
 
 
 def sha256(path: Path) -> str:
@@ -78,6 +93,8 @@ def audit_scope(
     bundle_name: str,
     expected_steps: int,
     expected_epsilon: float,
+    expected_loss_formulation: str,
+    expected_prompt_mode: str,
 ) -> set[str]:
     bundle = setup_root / bundle_name
     manifest_path = bundle / "attack_manifest.csv"
@@ -101,6 +118,37 @@ def audit_scope(
         lambda value: abs(value - expected_epsilon) <= 1e-12
     ).all():
         raise RuntimeError(f"Wrong epsilon in {manifest_path}")
+    formulations = (
+        manifest.loss_formulation.fillna("ce_focal_dice").astype(str)
+        if "loss_formulation" in manifest.columns
+        else pd.Series("ce_focal_dice", index=manifest.index)
+    )
+    if set(formulations) != {expected_loss_formulation}:
+        raise RuntimeError(f"Wrong loss formulation in {manifest_path}")
+    prompt_modes = (
+        manifest.prompt_mode.fillna("frozen_winclip").astype(str)
+        if "prompt_mode" in manifest.columns
+        else pd.Series("frozen_winclip", index=manifest.index)
+    )
+    if set(prompt_modes) != {expected_prompt_mode}:
+        raise RuntimeError(f"Wrong prompt mode in {manifest_path}")
+    if expected_prompt_mode == "learnable_object_agnostic":
+        required_prompt_columns = {
+            "prompt_checkpoint_sha256",
+            "prompt_checkpoint_dataset",
+            "prompt_checkpoint_epoch",
+            "prompt_n_ctx",
+        }
+        if not required_prompt_columns.issubset(manifest.columns):
+            raise RuntimeError(f"Missing prompt provenance in {manifest_path}")
+        if manifest.prompt_checkpoint_sha256.fillna("").str.len().ne(64).any():
+            raise RuntimeError(f"Invalid prompt checkpoint hash in {manifest_path}")
+        if not manifest.apply(
+            lambda row: str(row.prompt_checkpoint_dataset).lower()
+            == str(row.source_dataset).lower(),
+            axis=1,
+        ).all():
+            raise RuntimeError(f"Prompt/source dataset mismatch in {manifest_path}")
 
     numeric_columns = (
         "initial_total_loss",
@@ -133,7 +181,7 @@ def audit_scope(
     group_columns = [
         column for column in (
             "scope", "source_dataset", "target_dataset", "category",
-            "loss_mode", "attack_train_fraction",
+            "loss_formulation", "prompt_mode", "loss_mode", "attack_train_fraction",
         ) if column in manifest.columns
     ]
     for _, group in manifest.groupby(group_columns, dropna=False):
@@ -154,15 +202,26 @@ def audit_scope(
 def main() -> None:
     protocol_hashes: set[str] = set()
     for setup_id in selected_setups():
-        configured_steps, epsilon = SETUPS[setup_id]
-        expected_steps = SMOKE_STEPS if SMOKE else configured_steps
-        setup_root = ROOT / "setups" / setup_id
+        setup = SETUPS[setup_id]
+        expected_steps = SMOKE_STEPS if SMOKE else setup.steps
+        prompt_folder = (
+            "frozen_prompt"
+            if setup.prompt_mode == "frozen_winclip"
+            else "learnable_prompt"
+        )
+        setup_root = ROOT / "setups" / prompt_folder / setup_id
         audit_protocol(setup_root)
         for scope, (flag, bundle_name) in SCOPES.items():
             if enabled(flag):
                 protocol_hashes.update(
                     audit_scope(
-                        setup_root, scope, bundle_name, expected_steps, epsilon
+                        setup_root,
+                        scope,
+                        bundle_name,
+                        expected_steps,
+                        setup.epsilon,
+                        setup.loss_formulation,
+                        setup.prompt_mode,
                     )
                 )
     if len(protocol_hashes) != 1:

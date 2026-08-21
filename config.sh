@@ -5,9 +5,15 @@ MVTEC_ROOT="${MVTEC_ROOT:-/ABSOLUTE/PATH/TO/mvtec_anomaly_detection}"
 VISA_ROOT="${VISA_ROOT:-/ABSOLUTE/PATH/TO/VisA_20220922}"
 OUTPUT_BASE="${OUTPUT_BASE:-/ABSOLUTE/PATH/TO/canonical_clip_outputs}"
 
-# all, or a comma-separated subset of:
-# steps500_eps2, steps500_eps4, steps800_eps2, steps800_eps4
+# all, or a comma-separated subset of 16 isolated setups. Eight base IDs cover
+# loss/steps/epsilon with frozen WinCLIP prompts; append _learnable_prompt to
+# any base ID to load the object-agnostic shallow prompt checkpoint.
 RUN_SETUPS="${RUN_SETUPS:-all}"
+
+# frozen: run only WinCLIP prompt setups
+# learnable: run only object-agnostic learned-prompt setups
+# both: run both prompt families selected by RUN_SETUPS
+PROMPT_SETUP="${PROMPT_SETUP:-both}"
 
 # Pin the external feature-loader implementation used by every run.
 ANOMALYCLIP_COMMIT="${ANOMALYCLIP_COMMIT:-3911738c0867544f545a076ad78f3f11d9ecbfdf}"
@@ -61,6 +67,16 @@ NORMAL_LOCAL_TARGET="${NORMAL_LOCAL_TARGET:-fixed_region}"
 NORMAL_TARGET_REGION_FRACTION="${NORMAL_TARGET_REGION_FRACTION:-0.25}"
 NORMAL_TARGET_CENTER_X="${NORMAL_TARGET_CENTER_X:-0.5}"
 NORMAL_TARGET_CENTER_Y="${NORMAL_TARGET_CENTER_Y:-0.5}"
+
+# Relaxed loss: s(x)=z_abnormal(x)-z_normal(x) at image level and TopK(H(x))
+# at pixel level. The setup ID selects the loss; these configure K only.
+MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL="${MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL:-0.20}"
+MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL="${MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL:-0.40}"
+
+# Upload the prompt-training artifacts to Kaggle and replace these sample paths.
+# Only *_learnable_prompt setups read them; frozen setups ignore them.
+LEARNABLE_PROMPT_MVTEC_CHECKPOINT="${LEARNABLE_PROMPT_MVTEC_CHECKPOINT:-/ABSOLUTE/PATH/TO/artifacts/prompts/mvtec/prompts_epoch15.pt}"
+LEARNABLE_PROMPT_VISA_CHECKPOINT="${LEARNABLE_PROMPT_VISA_CHECKPOINT:-/ABSOLUTE/PATH/TO/artifacts/prompts/visa/prompts_epoch15.pt}"
 
 # Cosine decay prevents a sign-PGD iterate from bouncing indefinitely on the
 # Linf boundary. Full-training checkpoint losses are recorded at this interval.

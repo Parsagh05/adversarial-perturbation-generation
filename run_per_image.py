@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import zipfile
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -45,9 +46,14 @@ if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
 from adversarial_harness.attacks import TargetedPGD, direction_labels
-from adversarial_harness.config import AttackConfig
+from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import MVTecSample, discover_anomaly_datasets, load_image_tensor, load_mask
 from adversarial_harness.models import CLIPSurrogate
+from adversarial_harness.prompts import (
+    PROMPT_PROVENANCE_FIELDS,
+    VALID_PROMPT_MODES,
+    learnable_prompt_checkpoint,
+)
 from common import (
     LABEL_BALANCE_POLICY,
     assert_partition_disjoint,
@@ -129,6 +135,18 @@ CACHE_INPUTS_IN_RAM = bool_env("CACHE_INPUTS_IN_RAM", True)
 AUTO_REDUCE_MICRO_BATCH_ON_OOM = True
 DIRECTIONS = csv_tuple("DIRECTIONS", "normal_to_abnormal,abnormal_to_normal")
 LOSS_MODES = csv_tuple("LOSS_MODES", "global,local,combined")
+LOSS_FORMULATION = os.environ.get("LOSS_FORMULATION", "ce_focal_dice")
+if LOSS_FORMULATION not in VALID_LOSS_FORMULATIONS:
+    raise ValueError(f"Unknown LOSS_FORMULATION: {LOSS_FORMULATION}")
+PROMPT_MODE = os.environ.get("PROMPT_MODE", "frozen_winclip")
+if PROMPT_MODE not in VALID_PROMPT_MODES:
+    raise ValueError(f"Unknown PROMPT_MODE: {PROMPT_MODE}")
+MARGIN_TOPK_FRACTIONS = {
+    "normal_to_abnormal": float(os.environ.get("MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL", "0.20")),
+    "abnormal_to_normal": float(os.environ.get("MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL", "0.40")),
+}
+if any(not 0.0 < value <= 1.0 for value in MARGIN_TOPK_FRACTIONS.values()):
+    raise ValueError("MARGIN_TOPK_FRACTION values must be in (0, 1]")
 DATASETS = generation_datasets()
 DISCOVERY_MODE = DATASETS[0] if len(DATASETS) == 1 else "both"
 for dataset_name, dataset_root in (("mvtec", MVTEC_ROOT), ("visa", VISA_ROOT)):
@@ -225,7 +243,9 @@ def run_logical_batch(attacker, batch_samples, target_label, loss_mode):
                 clean = torch.stack([image_loader(s) for s in micro]).float()
                 masks = (
                     torch.stack([mask_loader(s) for s in micro])
-                    if loss_mode in {"local", "combined"} else None
+                    if LOSS_FORMULATION == "ce_focal_dice"
+                    and loss_mode in {"local", "combined"}
+                    else None
                 )
                 with autocast_context():
                     with torch.no_grad():
@@ -334,6 +354,8 @@ attack_config = AttackConfig(
     local_dice_weight=LOCAL_DICE_WEIGHT,
     local_focal_gamma=LOCAL_FOCAL_GAMMA,
     local_dice_smooth=LOCAL_DICE_SMOOTH,
+    loss_formulation=LOSS_FORMULATION,
+    margin_topk_fraction=MARGIN_TOPK_FRACTIONS["normal_to_abnormal"],
     step_size_schedule=STEP_SIZE_SCHEDULE,
     step_size_min_ratio=STEP_SIZE_MIN_RATIO,
     diagnostic_interval=DIAGNOSTIC_INTERVAL,
@@ -358,13 +380,17 @@ seed_everything(SEED)
 
 for dataset_name in DATASETS:
     categories = sorted({s.category for s in evaluation_samples if s.dataset == dataset_name})
-    print(f"\n===== {dataset_name}: frozen CLIP only =====")
+    prompt_checkpoint = learnable_prompt_checkpoint(dataset_name, PROMPT_MODE)
+    print(f"\n===== {dataset_name}: {PROMPT_MODE} =====")
     surrogate = CLIPSurrogate(
         anomalyclip_root=str(ANOMALYCLIP_ROOT),
         categories=categories,
         device="cuda",
         feature_layers=attack_config.feature_layers,
         clip_download_root=str(CLIP_CACHE),
+        prompt_mode=PROMPT_MODE,
+        learnable_prompt_checkpoint=prompt_checkpoint,
+        prompt_dataset=dataset_name,
     )
     try:
         for category in categories:
@@ -374,6 +400,9 @@ for dataset_name in DATASETS:
             )
             for direction in DIRECTIONS:
                 source_label, target_label = direction_labels(direction)
+                condition_config = replace(
+                    attack_config, margin_topk_fraction=MARGIN_TOPK_FRACTIONS[direction]
+                )
                 attacked_eval = [s for s in category_eval if s.label == source_label]
                 if not attacked_eval:
                     raise RuntimeError(f"No evaluation images for {dataset_name}/{category}/{direction}")
@@ -388,6 +417,7 @@ for dataset_name in DATASETS:
                         "category": category,
                         "direction": direction,
                         "loss_mode": loss_mode,
+                        "loss_formulation": LOSS_FORMULATION,
                         "epsilon": EPSILON,
                         "step_size": STEP_SIZE,
                         "per_image_steps": PER_IMAGE_STEPS,
@@ -402,7 +432,17 @@ for dataset_name in DATASETS:
                         "anomalyclip_loader_commit": ANOMALYCLIP_COMMIT,
                         "generator_script_sha256": GENERATOR_SCRIPT_SHA256,
                         "attack_code_sha256": ATTACK_CODE_SHA256,
-                        "local_objective": "target_class_focal_plus_soft_dice",
+                        "global_objective": (
+                            "signed_abnormal_minus_normal_margin"
+                            if LOSS_FORMULATION == "margin_topk"
+                            else "target_class_cross_entropy"
+                        ),
+                        "local_objective": (
+                            "signed_topk_anomaly_margin"
+                            if LOSS_FORMULATION == "margin_topk"
+                            else "target_class_focal_plus_soft_dice"
+                        ),
+                        "margin_topk_fraction": MARGIN_TOPK_FRACTIONS[direction],
                         "local_focal_weight": LOCAL_FOCAL_WEIGHT,
                         "local_dice_weight": LOCAL_DICE_WEIGHT,
                         "local_focal_gamma": LOCAL_FOCAL_GAMMA,
@@ -415,6 +455,7 @@ for dataset_name in DATASETS:
                         "step_size_schedule": STEP_SIZE_SCHEDULE,
                         "step_size_min_ratio": STEP_SIZE_MIN_RATIO,
                     }
+                    expected.update(surrogate.prompt_provenance)
                     if reusable(pt_path, expected):
                         print(f"[reuse] {dataset_name}/{category}/{direction}/{loss_mode}")
                         metadata = torch.load(pt_path, map_location="cpu", weights_only=False)["metadata"]
@@ -423,7 +464,7 @@ for dataset_name in DATASETS:
                             f"[generate] {dataset_name}/{category}/{direction}/{loss_mode}; "
                             f"evaluation_images={len(attacked_eval)}"
                         )
-                        attacker = TargetedPGD(surrogate, attack_config)
+                        attacker = TargetedPGD(surrogate, condition_config)
                         delta_list = []
                         actual_micro_sizes = []
                         diagnostic_batches = []
@@ -515,6 +556,8 @@ for row in artifact_rows:
         "source_label": row["source_label"],
         "target_label": row["target_label"],
         "loss_mode": row["loss_mode"],
+        "loss_formulation": row["loss_formulation"],
+        **{field: row[field] for field in PROMPT_PROVENANCE_FIELDS},
         "attack_train_fraction": 0.0,
         "attack_train_image_count": 0,
         "evaluation_attacked_image_count": row["evaluation_sample_count"],
@@ -532,6 +575,8 @@ for row in artifact_rows:
         "effective_batch_size": EFFECTIVE_BATCH_SIZE,
         "configured_micro_batch_size": MICRO_BATCH_SIZE,
         "local_objective": row["local_objective"],
+        "global_objective": row["global_objective"],
+        "margin_topk_fraction": row["margin_topk_fraction"],
         "local_focal_weight": row["local_focal_weight"],
         "local_dice_weight": row["local_dice_weight"],
         "local_focal_gamma": row["local_focal_gamma"],
@@ -560,6 +605,8 @@ pd.DataFrame([
         "category": row["category"],
         "direction": row["direction"],
         "loss_mode": row["loss_mode"],
+        "loss_formulation": row["loss_formulation"],
+        "prompt_mode": row["prompt_mode"],
         "initial_total_loss": row["initial_losses"]["total"],
         "final_total_loss": row["final_losses"]["total"],
         "total_loss_reduction": row["loss_reduction"]["total"],
@@ -567,6 +614,10 @@ pd.DataFrame([
         "final_local_focal": row["final_losses"].get("local_focal", ""),
         "initial_local_dice": row["initial_losses"].get("local_dice", ""),
         "final_local_dice": row["final_losses"].get("local_dice", ""),
+        "initial_global_margin": row["initial_losses"].get("global_margin", ""),
+        "final_global_margin": row["final_losses"].get("global_margin", ""),
+        "initial_local_topk": row["initial_losses"].get("local_topk", ""),
+        "final_local_topk": row["final_losses"].get("local_topk", ""),
         "convergence_check_passed": (
             row["initial_losses"]["total"] - row["final_losses"]["total"] > 1e-8
         ),

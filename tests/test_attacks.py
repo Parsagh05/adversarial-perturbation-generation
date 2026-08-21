@@ -117,5 +117,112 @@ class MaskAwareLocalLossTests(unittest.TestCase):
         self.assertLess(float(after), float(before))
 
 
+class MarginTopKLossTests(unittest.TestCase):
+    def _attacker(self, **overrides) -> TargetedPGD:
+        settings = {"temperature": 1.0, "loss_formulation": "margin_topk"}
+        settings.update(overrides)
+        return TargetedPGD(_FakeSurrogate(), AttackConfig(**settings))
+
+    def test_direction_sign_maximizes_for_normal_and_minimizes_for_anomalous(
+        self,
+    ) -> None:
+        attacker = self._attacker()
+        global_features = torch.tensor([[0.0, 1.0]])
+        patch_features = [
+            torch.tensor([[[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]])
+        ]
+        to_abnormal = attacker._group_losses(
+            global_features, patch_features, ["object"], 1, "combined"
+        )
+        to_normal = attacker._group_losses(
+            global_features, patch_features, ["object"], 0, "combined"
+        )
+        self.assertAlmostEqual(
+            float(to_abnormal["global"]), -float(to_abnormal["global_margin"])
+        )
+        self.assertAlmostEqual(
+            float(to_normal["global"]), float(to_normal["global_margin"])
+        )
+        self.assertAlmostEqual(
+            float(to_abnormal["local"]), -float(to_abnormal["local_topk"])
+        )
+        self.assertAlmostEqual(
+            float(to_normal["local"]), float(to_normal["local_topk"])
+        )
+
+    def test_topk_ignores_tokens_below_the_cut(self) -> None:
+        # After the CLS token, only the first patch has a positive anomaly
+        # margin. With K=1, changing the other patches must not change TopK(H).
+        attacker = self._attacker(margin_topk_fraction=0.25)
+        global_features = torch.zeros((1, 2))
+        first = [
+            torch.tensor(
+                [[[1.0, 0.0], [0.0, 2.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]]
+            )
+        ]
+        second = [
+            torch.tensor(
+                [[[1.0, 0.0], [0.0, 2.0], [0.2, 0.0], [0.3, 0.0], [0.4, 0.0]]]
+            )
+        ]
+        first_topk = attacker._group_losses(
+            global_features, first, ["object"], 1, "local"
+        )["local_topk"]
+        second_topk = attacker._group_losses(
+            global_features, second, ["object"], 1, "local"
+        )["local_topk"]
+        self.assertAlmostEqual(float(first_topk), float(second_topk))
+
+    def test_ground_truth_masks_do_not_change_relaxed_loss(self) -> None:
+        attacker = self._attacker(mask_local_loss=True)
+        global_features = torch.zeros((1, 2))
+        patches = [
+            torch.tensor([[[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]])
+        ]
+        zero_mask = torch.zeros((1, 2, 2))
+        one_mask = torch.ones((1, 2, 2))
+        without_mask = attacker._group_losses(
+            global_features, patches, ["object"], 1, "local"
+        )["total"]
+        with_zero = attacker._group_losses(
+            global_features, patches, ["object"], 1, "local", zero_mask
+        )["total"]
+        with_one = attacker._group_losses(
+            global_features, patches, ["object"], 1, "local", one_mask
+        )["total"]
+        self.assertAlmostEqual(float(without_mask), float(with_zero))
+        self.assertAlmostEqual(float(without_mask), float(with_one))
+
+    def test_one_targeted_step_reduces_relaxed_loss_in_every_mode(self) -> None:
+        for mode in ("global", "local", "combined"):
+            with self.subTest(mode=mode):
+                attacker = TargetedPGD(
+                    _DifferentiableFakeSurrogate(),
+                    AttackConfig(
+                        image_size=2,
+                        epsilon=0.5,
+                        step_size=0.05,
+                        steps=1,
+                        random_start=False,
+                        temperature=1.0,
+                        loss_formulation="margin_topk",
+                        margin_topk_fraction=0.5,
+                    ),
+                )
+                clean = torch.zeros((1, 3, 2, 2))
+                before = attacker.objective(clean, ["object"], 1, mode)
+                adversarial, _ = attacker.perturb_batch(
+                    clean, ["object"], 1, mode
+                )
+                after = attacker.objective(adversarial, ["object"], 1, mode)
+                self.assertLess(float(after), float(before))
+
+    def test_configuration_rejects_unknown_formulation_and_invalid_topk(self) -> None:
+        with self.assertRaisesRegex(ValueError, "loss_formulation"):
+            AttackConfig(loss_formulation="topk_only")
+        with self.assertRaisesRegex(ValueError, "margin_topk_fraction"):
+            AttackConfig(margin_topk_fraction=0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

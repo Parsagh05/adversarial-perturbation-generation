@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 VALID_SCOPES = ("per_image", "per_category", "dataset")
 VALID_DIRECTIONS = ("normal_to_abnormal", "abnormal_to_normal")
 VALID_LOSS_MODES = ("global", "local", "combined")
+VALID_LOSS_FORMULATIONS = ("ce_focal_dice", "margin_topk")
 VALID_STEP_SIZE_SCHEDULES = ("constant", "cosine")
 VALID_NORMAL_LOCAL_TARGETS = ("fixed_region", "full_image")
 VALID_UNIVERSAL_PROTOCOLS = ("transductive", "held_out")
@@ -56,6 +57,8 @@ class AttackConfig:
     local_dice_weight: float = 0.5
     local_focal_gamma: float = 2.0
     local_dice_smooth: float = 1.0
+    loss_formulation: str = "ce_focal_dice"
+    margin_topk_fraction: float = 0.20
     step_size_schedule: str = "constant"
     step_size_min_ratio: float = 0.1
     diagnostic_interval: int = 10
@@ -122,6 +125,14 @@ class AttackConfig:
             raise ValueError("local_focal_gamma cannot be negative")
         if self.local_dice_smooth <= 0:
             raise ValueError("local_dice_smooth must be positive")
+        self.loss_formulation = str(self.loss_formulation)
+        if self.loss_formulation not in VALID_LOSS_FORMULATIONS:
+            raise ValueError(
+                "loss_formulation must be one of "
+                f"{VALID_LOSS_FORMULATIONS}, got {self.loss_formulation!r}"
+            )
+        if not 0.0 < self.margin_topk_fraction <= 1.0:
+            raise ValueError("margin_topk_fraction must be in (0, 1]")
         self.step_size_schedule = str(self.step_size_schedule)
         if self.step_size_schedule not in VALID_STEP_SIZE_SCHEDULES:
             raise ValueError(

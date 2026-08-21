@@ -18,7 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .prompts import PromptEnsemble
+from .prompts import ObjectAgnosticPromptEnsemble, PromptEnsemble
 
 
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -71,6 +71,9 @@ class CLIPSurrogate:
         feature_layers: Sequence[int] = (6, 12, 18, 24),
         clip_model_name: str = "ViT-L/14@336px",
         clip_download_root: str = "",
+        prompt_mode: str = "frozen_winclip",
+        learnable_prompt_checkpoint: str = "",
+        prompt_dataset: str = "",
     ) -> None:
         self.device = torch.device(device)
         self.feature_layers = tuple(feature_layers)
@@ -112,9 +115,39 @@ class CLIPSurrogate:
             self._feature_handles.append(
                 blocks[layer - 1].register_forward_hook(capture_hook)
             )
-        self.prompts = PromptEnsemble(
-            self.model, prompt_module.tokenize, categories, str(self.device)
-        )
+        if prompt_mode == "frozen_winclip":
+            self.prompts = PromptEnsemble(
+                self.model, prompt_module.tokenize, categories, str(self.device)
+            )
+            self.prompt_provenance = {
+                "prompt_mode": "frozen_winclip",
+                "prompt_checkpoint_sha256": "",
+                "prompt_checkpoint_dataset": "",
+                "prompt_checkpoint_epoch": "",
+                "prompt_checkpoint_schema_version": "",
+                "prompt_checkpoint_sample_manifest_sha256": "",
+                "prompt_n_ctx": "",
+                "prompt_normal_suffix": "winclip_cartesian_normal_states",
+                "prompt_abnormal_suffix": "winclip_cartesian_abnormal_states",
+                "prompt_category_specific": True,
+                "prompt_deep_text_tuning": False,
+            }
+        elif prompt_mode == "learnable_object_agnostic":
+            if not learnable_prompt_checkpoint or not prompt_dataset:
+                raise ValueError(
+                    "Learnable prompts require checkpoint and source dataset"
+                )
+            self.prompts = ObjectAgnosticPromptEnsemble(
+                self.model,
+                prompt_module.tokenize,
+                categories,
+                str(self.device),
+                learnable_prompt_checkpoint,
+                prompt_dataset,
+            )
+            self.prompt_provenance = dict(self.prompts.provenance)
+        else:
+            raise ValueError(f"Unknown prompt_mode: {prompt_mode}")
 
     def encode_visual(
         self, images_01: torch.Tensor, include_patches: bool = True

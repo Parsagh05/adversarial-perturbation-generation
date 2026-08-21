@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -60,6 +61,8 @@ class TargetedPGD:
         total_local = global_features.new_zeros(())
         total_local_focal = global_features.new_zeros(())
         total_local_dice = global_features.new_zeros(())
+        total_global_margin = global_features.new_zeros(())
+        total_local_topk = global_features.new_zeros(())
         group_count = 0
 
         for category in sorted(set(categories)):
@@ -80,12 +83,22 @@ class TargetedPGD:
                     bank,
                     self.config.temperature,
                 )
-                total_global = total_global + F.cross_entropy(global_logits, target)
+                if self.config.loss_formulation == "margin_topk":
+                    global_margin = global_logits[:, 1] - global_logits[:, 0]
+                    raw_global_margin = global_margin.mean()
+                    direction_sign = -1.0 if target_label == 1 else 1.0
+                    total_global = total_global + direction_sign * raw_global_margin
+                    total_global_margin = total_global_margin + raw_global_margin
+                else:
+                    total_global = total_global + F.cross_entropy(
+                        global_logits, target
+                    )
 
             if mode in {"local", "combined"}:
                 layer_losses = []
                 layer_focal_losses = []
                 layer_dice_losses = []
+                layer_anomaly_maps = []
                 for patch in patch_features:
                     selected = patch.index_select(0, index_tensor)
                     # The first token is CLS; dense loss is defined only on patches.
@@ -95,6 +108,11 @@ class TargetedPGD:
                         selected, bank, self.config.temperature
                     )
                     token_count = selected.shape[1]
+                    if self.config.loss_formulation == "margin_topk":
+                        layer_anomaly_maps.append(
+                            local_logits[..., 1] - local_logits[..., 0]
+                        )
+                        continue
                     local_target = target[:, None].expand(-1, token_count)
                     token_ce = F.cross_entropy(
                         local_logits.reshape(-1, 2),
@@ -196,26 +214,52 @@ class TargetedPGD:
                         self.config.local_focal_weight * focal_loss
                         + self.config.local_dice_weight * dice_loss
                     )
-                if not layer_losses:
-                    raise RuntimeError("The surrogate returned no patch features")
-                total_local = total_local + torch.stack(layer_losses).mean()
-                total_local_focal = (
-                    total_local_focal + torch.stack(layer_focal_losses).mean()
-                )
-                total_local_dice = (
-                    total_local_dice + torch.stack(layer_dice_losses).mean()
-                )
+                if self.config.loss_formulation == "margin_topk":
+                    if not layer_anomaly_maps:
+                        raise RuntimeError("The surrogate returned no patch features")
+                    anomaly_map = torch.stack(layer_anomaly_maps).mean(dim=0)
+                    token_count = anomaly_map.shape[1]
+                    topk_count = max(
+                        1,
+                        min(
+                            token_count,
+                            int(math.ceil(
+                                token_count * self.config.margin_topk_fraction
+                            )),
+                        ),
+                    )
+                    topk_value = anomaly_map.topk(
+                        topk_count, dim=1, largest=True, sorted=False
+                    ).values.mean()
+                    direction_sign = -1.0 if target_label == 1 else 1.0
+                    total_local = total_local + direction_sign * topk_value
+                    total_local_topk = total_local_topk + topk_value
+                else:
+                    if not layer_losses:
+                        raise RuntimeError("The surrogate returned no patch features")
+                    total_local = total_local + torch.stack(layer_losses).mean()
+                    total_local_focal = (
+                        total_local_focal + torch.stack(layer_focal_losses).mean()
+                    )
+                    total_local_dice = (
+                        total_local_dice + torch.stack(layer_dice_losses).mean()
+                    )
             group_count += 1
 
         result: Dict[str, torch.Tensor] = {}
         if mode in {"global", "combined"}:
             result["global"] = total_global / group_count
+            if self.config.loss_formulation == "margin_topk":
+                result["global_margin"] = total_global_margin / group_count
         if mode in {"local", "combined"}:
             result["local"] = total_local / group_count
-            # These components are diagnostics; ``local`` is the weighted
-            # segmentation-aware objective used for optimization.
-            result["local_focal"] = total_local_focal / group_count
-            result["local_dice"] = total_local_dice / group_count
+            if self.config.loss_formulation == "margin_topk":
+                result["local_topk"] = total_local_topk / group_count
+            else:
+                # These components are diagnostics; ``local`` is the weighted
+                # segmentation-aware objective used for optimization.
+                result["local_focal"] = total_local_focal / group_count
+                result["local_dice"] = total_local_dice / group_count
         if mode == "global":
             result["total"] = result["global"]
         elif mode == "local":
@@ -583,6 +627,12 @@ class TargetedPGD:
                     ),
                     "diagnostic_local_dice": diagnostic_losses.get(
                         "local_dice", float("nan")
+                    ),
+                    "diagnostic_global_margin": diagnostic_losses.get(
+                        "global_margin", float("nan")
+                    ),
+                    "diagnostic_local_topk": diagnostic_losses.get(
+                        "local_topk", float("nan")
                     ),
                 }
             history.append(step_record)
