@@ -10,3 +10,4 @@ logs/
 *.zip
 *.log
 .ipynb_checkpoints/
+CLAUDE.md

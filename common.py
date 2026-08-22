@@ -44,14 +44,42 @@ def csv_tuple(name: str, default: str) -> tuple[str, ...]:
     return tuple(x.strip() for x in os.environ.get(name, default).split(",") if x.strip())
 
 
-def generation_datasets() -> tuple[str, ...]:
-    datasets = csv_tuple("GENERATION_DATASETS", "mvtec,visa")
+def _dataset_selection(name: str, default: str) -> tuple[str, ...]:
+    datasets = csv_tuple(name, default)
     if not datasets or len(set(datasets)) != len(datasets):
-        raise ValueError("GENERATION_DATASETS must contain unique dataset names")
+        raise ValueError(f"{name} must contain unique dataset names")
     unknown = sorted(set(datasets) - {"mvtec", "visa"})
     if unknown:
-        raise ValueError(f"Unknown GENERATION_DATASETS values: {unknown}")
+        raise ValueError(f"Unknown {name} values: {unknown}")
     return datasets
+
+
+def source_datasets() -> tuple[str, ...]:
+    """Datasets whose attack-training images may optimize perturbations."""
+
+    legacy = os.environ.get("GENERATION_DATASETS")
+    return _dataset_selection(
+        "SOURCE_DATASETS",
+        legacy if legacy is not None else "mvtec",
+    )
+
+
+def evaluation_datasets() -> tuple[str, ...]:
+    """Datasets whose fixed held-out IDs may receive universal perturbations."""
+
+    return _dataset_selection("EVALUATION_DATASETS", "mvtec,visa")
+
+
+def protocol_datasets() -> tuple[str, ...]:
+    """Stable union needed to create attack-train and evaluation CSVs."""
+
+    return tuple(dict.fromkeys((*source_datasets(), *evaluation_datasets())))
+
+
+def generation_datasets() -> tuple[str, ...]:
+    """Backward-compatible alias used by same-dataset attack scopes."""
+
+    return source_datasets()
 
 
 def parse_numeric(raw: str) -> float:
@@ -224,7 +252,7 @@ def prepare_protocol_split() -> None:
 
     split_seed = int(os.environ.get("SPLIT_SEED", "111"))
     evaluation_fraction = float(os.environ.get("EVALUATION_FRACTION", "0.50"))
-    datasets = generation_datasets()
+    datasets = protocol_datasets()
     discovery_mode = datasets[0] if len(datasets) == 1 else "both"
     if not (0.0 < evaluation_fraction < 1.0):
         raise ValueError("EVALUATION_FRACTION must be between 0 and 1")
@@ -238,6 +266,15 @@ def prepare_protocol_split() -> None:
                 "Existing protocol CSVs use datasets "
                 f"{sorted(stored_datasets)}, requested {sorted(datasets)}. "
                 "Use a dataset-specific OUTPUT_BASE."
+            )
+        if set(train.dataset.astype(str)) != set(source_datasets()):
+            raise RuntimeError(
+                "Existing attack_train_indices.csv does not match SOURCE_DATASETS"
+            )
+        if set(evaluation.dataset.astype(str)) != set(evaluation_datasets()):
+            raise RuntimeError(
+                "Existing evaluation_test_indices.csv does not match "
+                "EVALUATION_DATASETS"
             )
         stored_seed = set(pd.concat([train, evaluation]).split_seed.astype(int))
         stored_fraction = set(pd.concat([train, evaluation]).evaluation_fraction.astype(float))
@@ -268,7 +305,12 @@ def prepare_protocol_split() -> None:
         evaluation_samples = group[:n_eval]
         train_samples = group[n_eval:]
 
-        for partition, subset in (("attack_train", train_samples), ("evaluation", evaluation_samples)):
+        selected_partitions = []
+        if dataset in source_datasets():
+            selected_partitions.append(("attack_train", train_samples))
+        if dataset in evaluation_datasets():
+            selected_partitions.append(("evaluation", evaluation_samples))
+        for partition, subset in selected_partitions:
             for rank, sample in enumerate(subset, start=1):
                 rows.append({
                     "protocol_id": sample.protocol_id,

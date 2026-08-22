@@ -63,6 +63,7 @@ from common import (
     generation_datasets,
     parse_fraction_list,
     parse_numeric,
+    protocol_datasets,
     select_attack_train_fraction,
     sha256_file,
     split_sha256,
@@ -160,9 +161,10 @@ MARGIN_TOPK_FRACTIONS = {
 if any(not 0.0 < value <= 1.0 for value in MARGIN_TOPK_FRACTIONS.values()):
     raise ValueError("MARGIN_TOPK_FRACTION values must be in (0, 1]")
 DATASETS = generation_datasets()
-DISCOVERY_MODE = DATASETS[0] if len(DATASETS) == 1 else "both"
+PROTOCOL_DATASETS = protocol_datasets()
+DISCOVERY_MODE = PROTOCOL_DATASETS[0] if len(PROTOCOL_DATASETS) == 1 else "both"
 for dataset_name, dataset_root in (("mvtec", MVTEC_ROOT), ("visa", VISA_ROOT)):
-    if dataset_name in DATASETS and not dataset_root.is_dir():
+    if dataset_name in PROTOCOL_DATASETS and not dataset_root.is_dir():
         raise FileNotFoundError(dataset_root)
 
 if EFFECTIVE_BATCH_SIZE < 1 or MICRO_BATCH_SIZE < 1:
@@ -195,8 +197,8 @@ print("Effective batch / micro-batch:", EFFECTIVE_BATCH_SIZE, MICRO_BATCH_SIZE)
 
 all_discovered = discover_anomaly_datasets(
     dataset=DISCOVERY_MODE,
-    mvtec_root=str(MVTEC_ROOT) if "mvtec" in DATASETS else None,
-    visa_root=str(VISA_ROOT) if "visa" in DATASETS else None,
+    mvtec_root=str(MVTEC_ROOT) if "mvtec" in PROTOCOL_DATASETS else None,
+    visa_root=str(VISA_ROOT) if "visa" in PROTOCOL_DATASETS else None,
     categories=None,
     max_samples_per_category=None,
     train_normal=False,

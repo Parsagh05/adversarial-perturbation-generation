@@ -26,10 +26,11 @@ for name in OUTPUT_BASE; do
   value="${!name}"
   [[ "$value" != /ABSOLUTE/PATH/TO/* ]] || { echo "Edit $name in config.sh" >&2; exit 2; }
 done
-case ",$GENERATION_DATASETS," in
+SELECTED_PROTOCOL_DATASETS="$SOURCE_DATASETS,$EVALUATION_DATASETS"
+case ",$SELECTED_PROTOCOL_DATASETS," in
   *,mvtec,*) [[ -d "$MVTEC_ROOT" ]] || { echo "Missing MVTec directory: $MVTEC_ROOT" >&2; exit 2; } ;;
 esac
-case ",$GENERATION_DATASETS," in
+case ",$SELECTED_PROTOCOL_DATASETS," in
   *,visa,*) [[ -d "$VISA_ROOT" ]] || { echo "Missing VisA directory: $VISA_ROOT" >&2; exit 2; } ;;
 esac
 mkdir -p "$WORK_DIR" "$PIPELINE_OUTPUT/setups"
@@ -159,13 +160,13 @@ for index in "${!SETUP_IDS[@]}"; do
   fi
 done
 if [[ "$learnable_selected" == "true" ]]; then
-  case ",$GENERATION_DATASETS," in
+  case ",$SOURCE_DATASETS," in
     *,mvtec,*) [[ -f "$LEARNABLE_PROMPT_MVTEC_CHECKPOINT" ]] || {
       echo "Missing MVTec learnable-prompt checkpoint: $LEARNABLE_PROMPT_MVTEC_CHECKPOINT" >&2
       exit 2
     } ;;
   esac
-  case ",$GENERATION_DATASETS," in
+  case ",$SOURCE_DATASETS," in
     *,visa,*) [[ -f "$LEARNABLE_PROMPT_VISA_CHECKPOINT" ]] || {
       echo "Missing VisA learnable-prompt checkpoint: $LEARNABLE_PROMPT_VISA_CHECKPOINT" >&2
       exit 2

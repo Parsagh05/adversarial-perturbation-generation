@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate source-dataset universal CLIP perturbations without split leakage.
 
-For each attack-training fraction, exactly six deltas are optimized on MVTec and
-six on VisA (2 directions x 3 losses). A delta is optimized once from its source
-dataset and can then be evaluated on either target dataset. Target anomaly
-models are never loaded here.
+For each attack-training fraction, one set of deltas is optimized for every
+selected source dataset (2 directions x 3 losses). A delta is optimized once
+from its source dataset and can then be evaluated on every selected evaluation
+dataset. Target anomaly models are never loaded here.
 """
 from __future__ import annotations
 
@@ -61,11 +61,13 @@ from common import (
     assert_partition_disjoint,
     bind_discovered_samples_from_partition_csvs,
     fraction_tag,
-    generation_datasets,
+    evaluation_datasets,
     parse_fraction_list,
     parse_numeric,
+    protocol_datasets,
     select_attack_train_fraction,
     sha256_file,
+    source_datasets,
     split_sha256,
 )
 
@@ -147,10 +149,12 @@ MARGIN_TOPK_FRACTIONS = {
 }
 if any(not 0.0 < value <= 1.0 for value in MARGIN_TOPK_FRACTIONS.values()):
     raise ValueError("MARGIN_TOPK_FRACTION values must be in (0, 1]")
-DATASETS = generation_datasets()
-DISCOVERY_MODE = DATASETS[0] if len(DATASETS) == 1 else "both"
+SOURCE_DATASETS = source_datasets()
+EVALUATION_DATASETS = evaluation_datasets()
+PROTOCOL_DATASETS = protocol_datasets()
+DISCOVERY_MODE = PROTOCOL_DATASETS[0] if len(PROTOCOL_DATASETS) == 1 else "both"
 for dataset_name, dataset_root in (("mvtec", MVTEC_ROOT), ("visa", VISA_ROOT)):
-    if dataset_name in DATASETS and not dataset_root.is_dir():
+    if dataset_name in PROTOCOL_DATASETS and not dataset_root.is_dir():
         raise FileNotFoundError(dataset_root)
 
 if set(DIRECTIONS) != {"normal_to_abnormal", "abnormal_to_normal"}:
@@ -169,13 +173,15 @@ print("Protocol SHA256:", split_sha256())
 print("Attack-train fractions:", TRAIN_FRACTIONS)
 print("Loss formulation:", LOSS_FORMULATION)
 print("Prompt mode:", PROMPT_MODE)
-print("Expected optimization runs:", len(DATASETS) * len(TRAIN_FRACTIONS) * len(DIRECTIONS) * len(LOSS_MODES))
-print("Important: each source delta is optimized once and referenced by both target datasets.")
+print("Source datasets:", SOURCE_DATASETS)
+print("Evaluation datasets:", EVALUATION_DATASETS)
+print("Expected optimization runs:", len(SOURCE_DATASETS) * len(TRAIN_FRACTIONS) * len(DIRECTIONS) * len(LOSS_MODES))
+print("Important: each source delta is optimized once and referenced by every evaluation dataset.")
 
 all_discovered = discover_anomaly_datasets(
     dataset=DISCOVERY_MODE,
-    mvtec_root=str(MVTEC_ROOT) if "mvtec" in DATASETS else None,
-    visa_root=str(VISA_ROOT) if "visa" in DATASETS else None,
+    mvtec_root=str(MVTEC_ROOT) if "mvtec" in PROTOCOL_DATASETS else None,
+    visa_root=str(VISA_ROOT) if "visa" in PROTOCOL_DATASETS else None,
     categories=None,
     max_samples_per_category=None,
     train_normal=False,
@@ -259,7 +265,7 @@ ATTACK_CODE_SHA256 = sha256_file(PROJECT_ROOT / "adversarial_harness" / "attacks
 protocol_sha = split_sha256()
 artifact_rows = []
 
-for source_dataset in DATASETS:
+for source_dataset in SOURCE_DATASETS:
     categories = sorted({s.category for s in samples if s.dataset == source_dataset})
     prompt_checkpoint = learnable_prompt_checkpoint(source_dataset, PROMPT_MODE)
     print(f"\n===== SOURCE {source_dataset}: {PROMPT_MODE} =====")
@@ -291,6 +297,8 @@ for source_dataset in DATASETS:
                     raise RuntimeError(
                         f"No attack_train images for {source_dataset}/{fraction}/{direction}"
                     )
+                if any(sample.dataset != source_dataset for sample in source_train):
+                    raise RuntimeError("A non-source dataset entered attack optimization")
                 for loss_mode in LOSS_MODES:
                     pt_path = artifact_path(source_dataset, fraction, direction, loss_mode)
                     pt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -390,7 +398,7 @@ for source_dataset in DATASETS:
                                 and s.label == source_label
                                 and assignments[s.protocol_id] == "evaluation"
                             )
-                            for target in DATASETS
+                            for target in EVALUATION_DATASETS
                         }
                         metadata = {
                             **expected,
@@ -404,7 +412,9 @@ for source_dataset in DATASETS:
                             "evaluation_partition_seen_during_optimization": False,
                             "attack_train_sample_count": len(source_train),
                             "attack_train_sample_ids": [s.protocol_id for s in source_train],
-                            "applicable_target_datasets": list(DATASETS),
+                            "source_datasets": list(SOURCE_DATASETS),
+                            "evaluation_datasets": list(EVALUATION_DATASETS),
+                            "applicable_target_datasets": list(EVALUATION_DATASETS),
                             "evaluation_attacked_counts_by_target": evaluation_counts,
                             "source_categories": categories,
                             "diagnostic_sample_ids": result.diagnostic_sample_ids,
@@ -458,7 +468,7 @@ for row in artifact_rows:
         raise RuntimeError(f"Leakage in artifact {artifact}")
     relative_noise = artifact.relative_to(OUTPUT_ROOT)
     unique_noise_paths.append(artifact)
-    for target_dataset in DATASETS:
+    for target_dataset in EVALUATION_DATASETS:
         attacked_eval_ids = sorted(
             s.protocol_id for s in samples
             if s.dataset == target_dataset
@@ -568,7 +578,9 @@ for delivery in delivery_rows:
     if sha256_file(recorded_noise) != delivery["artifact_sha256"]:
         raise RuntimeError(f"Manifest checksum mismatch: {recorded_noise}")
 
-dataset_tag = "_".join(DATASETS)
+source_tag = "-".join(SOURCE_DATASETS)
+evaluation_tag = "-".join(EVALUATION_DATASETS)
+dataset_tag = f"{source_tag}_to_{evaluation_tag}"
 archive_path = OUTPUT_BASE / (
     f"canonical_clip_per_dataset_{dataset_tag}_{SETUP_ID}.zip"
 )
@@ -604,5 +616,9 @@ if missing_archive_names:
 
 print("\nPer-dataset optimization artifacts:", len(artifact_rows))
 print("Per-dataset evaluation manifest rows:", len(delivery_rows))
-print("Expected: optimizations = 12 x number_of_fractions; evaluations = 24 x number_of_fractions")
+print(
+    "Expected optimizations:",
+    len(SOURCE_DATASETS) * len(TRAIN_FRACTIONS) * len(DIRECTIONS) * len(LOSS_MODES),
+)
+print("Expected evaluation rows:", len(artifact_rows) * len(EVALUATION_DATASETS))
 print("ZIP:", archive_path)

@@ -23,7 +23,8 @@ export VISA_ROOT=/absolute/path/to/VisA_20220922
 export OUTPUT_BASE=/absolute/path/to/smoke_test_outputs
 export PYTHON_BIN="$(command -v python3)"
 
-export GENERATION_DATASETS=mvtec
+export SOURCE_DATASETS=mvtec
+export EVALUATION_DATASETS=mvtec,visa
 export RUN_SETUPS=steps500_eps2
 export PROMPT_SETUP=frozen
 export RUN_PER_DATASET=true
@@ -53,7 +54,8 @@ export PROMPT_SETUP=learnable
 ```
 
 For VisA learnable setups, set `LEARNABLE_PROMPT_VISA_CHECKPOINT` to the VisA
-checkpoint. When `GENERATION_DATASETS=mvtec,visa`, both paths are required.
+checkpoint. Only source datasets require learned-prompt checkpoints; an
+evaluation-only VisA target does not require the VisA prompt checkpoint.
 Frozen setup IDs ignore these variables.
 
 Use `PROMPT_SETUP=both` to run frozen and learnable variants together. You can
@@ -71,7 +73,8 @@ export VISA_ROOT=/absolute/path/to/VisA_20220922
 export OUTPUT_BASE=/absolute/path/to/final_perturbation_outputs
 export PYTHON_BIN="$(command -v python3)"
 
-export GENERATION_DATASETS=mvtec,visa
+export SOURCE_DATASETS=mvtec
+export EVALUATION_DATASETS=mvtec,visa
 export RUN_SETUPS=all
 export PROMPT_SETUP=both
 export RUN_PER_DATASET=true

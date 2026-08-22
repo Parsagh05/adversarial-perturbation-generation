@@ -105,6 +105,16 @@ evaluation half, with one aligned delta per image. Both directions therefore
 still use matched counts, while per-image mode correctly reports zero
 attack-training images.
 
+Dataset selection separates optimization from delivery. `SOURCE_DATASETS`
+controls which attack-training images may optimize perturbations, while
+`EVALUATION_DATASETS` controls the held-out targets for per-dataset universal
+transfer. For example, `SOURCE_DATASETS=mvtec` and
+`EVALUATION_DATASETS=mvtec,visa` optimizes one MVTec delta and records both
+MVTec-to-MVTec and MVTec-to-VisA delivery rows referencing that same file and
+checksum. The protocol CSV includes fixed evaluation IDs for both datasets,
+but no VisA image enters optimization. Per-category and per-image outputs use
+`SOURCE_DATASETS` only and remain same-dataset.
+
 ## Optimization safeguards
 
 - Dataset-level attacks default to a T4-safe batch of 2.
@@ -181,11 +191,10 @@ one dataset, and normally one scope per saved session. Per-image generation is
 especially expensive because every held-out image receives its own 500- or
 800-step perturbation.
 
-Use `GENERATION_DATASETS=mvtec` or `GENERATION_DATASETS=visa` to split the two
-collections across sessions. In the Kaggle notebook, set `DATASETS =
-('mvtec',)` or `('visa',)`. Each selection uses a separate output/protocol
-directory, preventing a split generated for one selection from being reused by
-another.
+Use `SOURCE_DATASETS=mvtec` and `EVALUATION_DATASETS=mvtec,visa` for a MVTec
+source attack transferred to both datasets. In the Kaggle notebook, set
+`SOURCE_DATASETS = ('mvtec',)` and `EVALUATION_DATASETS = ('mvtec', 'visa')`.
+Each source/evaluation selection uses a separate output/protocol directory.
 
 ## Outputs
 
