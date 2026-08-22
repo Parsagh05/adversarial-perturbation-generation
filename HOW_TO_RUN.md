@@ -6,7 +6,8 @@ local MVTec AD and VisA dataset directories.
 ```bash
 git clone https://github.com/Parsagh05/adversarial-perturbation-generation.git
 cd adversarial-perturbation-generation
-git checkout ff874e6ac7cb0b9e16e73048503e9099271f1121
+git checkout main
+git pull --ff-only origin main
 ```
 
 Install a CUDA-compatible PyTorch build first. `train.sh` installs the remaining
@@ -88,6 +89,7 @@ Successful completion ends with:
 ```text
 GENERATION AUDIT PASSED
 Done. Results are in: <OUTPUT_BASE>/setups
+Combined archive: <OUTPUT_BASE>/full_outputs.zip
 ```
 
 Outputs for each setup are under:
@@ -95,7 +97,11 @@ Outputs for each setup are under:
 ```text
 <OUTPUT_BASE>/setups/frozen_prompt/<frozen_setup_id>/
 <OUTPUT_BASE>/setups/learnable_prompt/<learnable_setup_id>/
+<OUTPUT_BASE>/full_outputs.zip
 ```
+
+`full_outputs.zip` contains the complete setup tree but excludes the redundant
+per-scope ZIP files already stored inside individual setup directories.
 
 The legacy setup IDs are `steps500_eps2`, `steps500_eps4`, `steps800_eps2`, and
 `steps800_eps4`. The new loss has four separate setup IDs formed by appending

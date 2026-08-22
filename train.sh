@@ -226,4 +226,7 @@ for index in "${!SETUP_IDS[@]}"; do
 done
 
 "$PYTHON" "$ROOT/audit_generation.py"
+export PIPELINE_OUTPUT
+"$PYTHON" "$ROOT/package_full_outputs.py"
 echo "Done. Results are in: $PIPELINE_OUTPUT/setups"
+echo "Combined archive: $PIPELINE_OUTPUT/full_outputs.zip"

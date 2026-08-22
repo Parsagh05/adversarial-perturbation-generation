@@ -209,6 +209,12 @@ bundles, and archives:
 - `canonical_clip_per_category_<datasets>_<setup_id>.zip`
 - `canonical_clip_per_image_<datasets>_<setup_id>.zip`
 
+After every selected setup passes the generation audit, the launcher also
+creates `OUTPUT_BASE/full_outputs.zip`. This combined archive contains the
+complete `setups/` directory tree, including perturbations, manifests,
+diagnostics, protocols, and logs. Existing per-scope ZIP files are not nested
+inside it, avoiding duplicate copies of the same perturbations.
+
 For example, a MVTec dataset-level run is packaged as
 `canonical_clip_per_dataset_mvtec_steps500_eps2.zip`. Dataset, scope, steps,
 epsilon, and loss setup remain separate. A relaxed-loss run uses a distinct
