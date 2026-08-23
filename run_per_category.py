@@ -172,14 +172,17 @@ if EFFECTIVE_BATCH_SIZE < 1 or MICRO_BATCH_SIZE < 1:
 if MICRO_BATCH_SIZE > EFFECTIVE_BATCH_SIZE:
     raise ValueError("PER_CATEGORY_MICRO_BATCH_SIZE cannot exceed effective batch size")
 
-AMP_DTYPE_NAME = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
-AMP_DTYPE = torch.bfloat16 if AMP_DTYPE_NAME == "bfloat16" else torch.float16
+# Sign-PGD consumes only gradient.sign(), so an fp16 gradient that underflows
+# silently zeroes part of the update instead of shrinking it. Autocast is
+# therefore restricted to bf16 hardware; elsewhere the attack stays fp32.
+AMP_DTYPE_NAME = "bfloat16" if torch.cuda.is_bf16_supported() else "disabled_no_bf16"
+AMP_ENABLED = USE_AMP and AMP_DTYPE_NAME == "bfloat16"
 
 
 def autocast_context():
     return (
-        torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=True)
-        if USE_AMP else nullcontext()
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True)
+        if AMP_ENABLED else nullcontext()
     )
 
 
@@ -194,6 +197,7 @@ print("Protocol SHA256:", split_sha256())
 print("Attack-train fractions:", TRAIN_FRACTIONS)
 print("Universal steps / step size:", UNIVERSAL_STEPS, UNIVERSAL_STEP_SIZE)
 print("Effective batch / micro-batch:", EFFECTIVE_BATCH_SIZE, MICRO_BATCH_SIZE)
+print("Autocast:", AMP_DTYPE_NAME if AMP_ENABLED else "disabled; fp32 sign-PGD")
 
 all_discovered = discover_anomaly_datasets(
     dataset=DISCOVERY_MODE,
@@ -277,16 +281,17 @@ def optimize_accumulated(
     micro_batch_size = min(MICRO_BATCH_SIZE, EFFECTIVE_BATCH_SIZE)
     diagnostic_samples = list(source_samples)
     diagnostic_sample_ids = [sample.protocol_id for sample in diagnostic_samples]
+    # Baseline checkpoint is the unperturbed image, as in optimize_universal.
+    best_delta = torch.zeros_like(delta)
     initial_losses = attacker._diagnostic_losses(
         diagnostic_samples,
         image_loader,
-        delta,
+        best_delta,
         target_label,
         loss_mode,
         mask_loader=mask_fn,
     )
     history = []
-    best_delta = delta.detach().clone()
     best_diagnostic_loss = initial_losses["total"]
     selected_step = 0
 

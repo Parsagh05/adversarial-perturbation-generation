@@ -162,14 +162,17 @@ if MICRO_BATCH_SIZE < 1 or EFFECTIVE_BATCH_SIZE < 1:
 if MICRO_BATCH_SIZE > EFFECTIVE_BATCH_SIZE:
     raise ValueError("PER_IMAGE_MICRO_BATCH_SIZE cannot exceed effective batch size")
 
-AMP_DTYPE_NAME = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
-AMP_DTYPE = torch.bfloat16 if AMP_DTYPE_NAME == "bfloat16" else torch.float16
+# Sign-PGD consumes only gradient.sign(), so an fp16 gradient that underflows
+# silently zeroes part of the update instead of shrinking it. Autocast is
+# therefore restricted to bf16 hardware; elsewhere the attack stays fp32.
+AMP_DTYPE_NAME = "bfloat16" if torch.cuda.is_bf16_supported() else "disabled_no_bf16"
+AMP_ENABLED = USE_AMP and AMP_DTYPE_NAME == "bfloat16"
 
 
 def autocast_context():
     return (
-        torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=True)
-        if USE_AMP else nullcontext()
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True)
+        if AMP_ENABLED else nullcontext()
     )
 
 
@@ -183,6 +186,7 @@ print("GPU:", torch.cuda.get_device_name(0))
 print("Protocol SHA256:", split_sha256())
 print("Per-image steps / step size:", PER_IMAGE_STEPS, STEP_SIZE)
 print("Evaluation fraction:", EVALUATION_FRACTION)
+print("Autocast:", AMP_DTYPE_NAME if AMP_ENABLED else "disabled; fp32 sign-PGD")
 print("Per-image uses zero attack_train images; each delta sees exactly its aligned evaluation image.")
 
 all_discovered = discover_anomaly_datasets(

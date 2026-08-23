@@ -494,16 +494,20 @@ class TargetedPGD:
             )
             for index, sample in enumerate(diagnostic_samples)
         ]
+        # The unperturbed image is the baseline checkpoint, matching
+        # ``perturb_batch``. Measuring the initial losses at delta=0 rather than
+        # at the random start keeps loss reductions comparable with the
+        # per-image scope and lets a run that never beats "no attack" say so.
+        best_delta = torch.zeros_like(delta)
         initial_losses = self._diagnostic_losses(
             diagnostic_samples,
             image_loader,
-            delta,
+            best_delta,
             target_label,
             mode,
             mask_loader=mask_loader,
         )
         history: List[Dict[str, float]] = []
-        best_delta = delta.detach().clone()
         best_diagnostic_loss = initial_losses["total"]
         selected_step = 0
 

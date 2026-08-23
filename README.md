@@ -17,8 +17,33 @@ target class is optimized with:
 
 ```
 local = LOCAL_FOCAL_WEIGHT * target_class_focal
-      + LOCAL_DICE_WEIGHT  * target_class_soft_dice
+      + LOCAL_DICE_WEIGHT  * target_class_region_dice
 ```
+
+Both terms follow AnomalyCLIP's focal-plus-Dice segmentation objective, adapted
+from *training a predictor against a ground-truth mask* to *steering a
+perturbation toward a chosen class inside a chosen region*. The mask is
+therefore used as a spatial weight `w = LOCAL_BACKGROUND_WEIGHT + (1 -
+LOCAL_BACKGROUND_WEIGHT) * mask` rather than as a regression target:
+
+- `target_class_focal` is standard focal loss, `(1 - p_target)^gamma * CE`,
+  averaged over tokens with weights `w` in place of a scalar alpha.
+- `target_class_region_dice` is `1 - (2*sum(p*w) + s) / (sum(p*w) + sum(w) + s)`,
+  with `LOCAL_DICE_SMOOTH=1.0` matching the hardcoded `smooth = 1` of
+  AnomalyCLIP's `BinaryDiceLoss`, which computes
+  `1 - (2*sum(p*g) + 1) / (sum(p) + sum(g) + 1)`.
+
+Two differences from AnomalyCLIP are deliberate and worth stating when citing
+this objective:
+
+1. The denominator uses `sum(p*w)` where `BinaryDiceLoss` uses the unweighted
+   `sum(p)`. The term is therefore a strictly decreasing function of `sum(p*w)`
+   alone: it rewards target-class probability inside the weighted region but
+   does not penalize it outside.
+2. AnomalyCLIP applies Dice twice per layer, on the abnormal channel against
+   `gt` and on the normal channel against `1 - gt`, so its complement is scored
+   by the second call. This generator scores only the requested target class,
+   because the opposite class is what the attack is trying to move away from.
 
 - `normal_to_abnormal`: a configurable fixed synthetic region is targeted as
   anomalous. The default is a centred square spanning 25% of each image side.
@@ -127,6 +152,13 @@ but no VisA image enters optimization. Per-category and per-image outputs use
 - The checkpoint with the lowest complete attack-training loss is saved, rather
   than blindly saving the last stochastic iterate. The held-out evaluation
   split is never used for checkpoint selection.
+- The unperturbed image is the baseline checkpoint in every scope, so reported
+  initial losses and loss reductions are measured from `delta=0` rather than
+  from the random start, and a run that never beats "no attack" is reported as
+  such instead of being credited with the random start's loss.
+- Universal scopes use mixed precision only on bf16-capable hardware. Sign-PGD
+  reads `gradient.sign()`, so an underflowed fp16 gradient would silently zero
+  part of the update; the attack falls back to fp32 elsewhere.
 - Every bundle includes `optimization_diagnostics.csv`.
 - Artifact reuse checks include all loss/schedule settings, generator hashes,
   repository commit, and the pinned AnomalyCLIP commit.
