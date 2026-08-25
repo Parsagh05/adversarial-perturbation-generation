@@ -46,7 +46,11 @@ if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
 from adversarial_harness.attacks import TargetedPGD, direction_labels
-from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
+from adversarial_harness.config import (
+    AttackConfig,
+    VALID_GRADIENT_NORMALIZATIONS,
+    VALID_LOSS_FORMULATIONS,
+)
 from adversarial_harness.dataset import MVTecSample, discover_anomaly_datasets, load_image_tensor, load_mask
 from adversarial_harness.models import CLIPSurrogate
 from adversarial_harness.prompts import (
@@ -142,6 +146,9 @@ if LOSS_FORMULATION not in VALID_LOSS_FORMULATIONS:
 PROMPT_MODE = os.environ.get("PROMPT_MODE", "frozen_winclip")
 if PROMPT_MODE not in VALID_PROMPT_MODES:
     raise ValueError(f"Unknown PROMPT_MODE: {PROMPT_MODE}")
+GRADIENT_NORMALIZATION = os.environ.get("GRADIENT_NORMALIZATION", "none")
+if GRADIENT_NORMALIZATION not in VALID_GRADIENT_NORMALIZATIONS:
+    raise ValueError(f"Unknown GRADIENT_NORMALIZATION: {GRADIENT_NORMALIZATION}")
 MARGIN_TOPK_FRACTIONS = {
     "normal_to_abnormal": float(os.environ.get("MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL", "0.20")),
     "abnormal_to_normal": float(os.environ.get("MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL", "0.40")),
@@ -364,6 +371,7 @@ attack_config = AttackConfig(
     local_dice_smooth=LOCAL_DICE_SMOOTH,
     loss_formulation=LOSS_FORMULATION,
     margin_topk_fraction=MARGIN_TOPK_FRACTIONS["normal_to_abnormal"],
+    gradient_normalization=GRADIENT_NORMALIZATION,
     step_size_schedule=STEP_SIZE_SCHEDULE,
     step_size_min_ratio=STEP_SIZE_MIN_RATIO,
     diagnostic_interval=DIAGNOSTIC_INTERVAL,
@@ -451,6 +459,7 @@ for dataset_name in DATASETS:
                             else "target_class_focal_plus_soft_dice"
                         ),
                         "margin_topk_fraction": MARGIN_TOPK_FRACTIONS[direction],
+                        "gradient_normalization": GRADIENT_NORMALIZATION,
                         "local_focal_weight": LOCAL_FOCAL_WEIGHT,
                         "local_dice_weight": LOCAL_DICE_WEIGHT,
                         "local_focal_gamma": LOCAL_FOCAL_GAMMA,
@@ -585,6 +594,7 @@ for row in artifact_rows:
         "local_objective": row["local_objective"],
         "global_objective": row["global_objective"],
         "margin_topk_fraction": row["margin_topk_fraction"],
+        "gradient_normalization": row["gradient_normalization"],
         "local_focal_weight": row["local_focal_weight"],
         "local_dice_weight": row["local_dice_weight"],
         "local_focal_gamma": row["local_focal_gamma"],
@@ -614,6 +624,7 @@ pd.DataFrame([
         "direction": row["direction"],
         "loss_mode": row["loss_mode"],
         "loss_formulation": row["loss_formulation"],
+        "gradient_normalization": row["gradient_normalization"],
         "prompt_mode": row["prompt_mode"],
         "initial_total_loss": row["initial_losses"]["total"],
         "final_total_loss": row["final_losses"]["total"],

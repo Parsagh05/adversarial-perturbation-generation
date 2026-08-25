@@ -43,7 +43,11 @@ if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
 from adversarial_harness.attacks import TargetedPGD, direction_labels
-from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
+from adversarial_harness.config import (
+    AttackConfig,
+    VALID_GRADIENT_NORMALIZATIONS,
+    VALID_LOSS_FORMULATIONS,
+)
 from adversarial_harness.dataset import (
     MVTecSample,
     discover_anomaly_datasets,
@@ -143,12 +147,18 @@ if LOSS_FORMULATION not in VALID_LOSS_FORMULATIONS:
 PROMPT_MODE = os.environ.get("PROMPT_MODE", "frozen_winclip")
 if PROMPT_MODE not in VALID_PROMPT_MODES:
     raise ValueError(f"Unknown PROMPT_MODE: {PROMPT_MODE}")
+GRADIENT_NORMALIZATION = os.environ.get("GRADIENT_NORMALIZATION", "none")
+if GRADIENT_NORMALIZATION not in VALID_GRADIENT_NORMALIZATIONS:
+    raise ValueError(f"Unknown GRADIENT_NORMALIZATION: {GRADIENT_NORMALIZATION}")
 MARGIN_TOPK_FRACTIONS = {
     "normal_to_abnormal": float(os.environ.get("MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL", "0.20")),
     "abnormal_to_normal": float(os.environ.get("MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL", "0.40")),
 }
 if any(not 0.0 < value <= 1.0 for value in MARGIN_TOPK_FRACTIONS.values()):
     raise ValueError("MARGIN_TOPK_FRACTION values must be in (0, 1]")
+TRANSFER_SETTINGS = csv_tuple("DATASET_TRANSFER_SETTINGS", "same_dataset,cross_dataset")
+if not TRANSFER_SETTINGS or not set(TRANSFER_SETTINGS) <= {"same_dataset", "cross_dataset"}:
+    raise ValueError(f"Unexpected DATASET_TRANSFER_SETTINGS: {TRANSFER_SETTINGS}")
 SOURCE_DATASETS = source_datasets()
 EVALUATION_DATASETS = evaluation_datasets()
 PROTOCOL_DATASETS = protocol_datasets()
@@ -159,11 +169,18 @@ for dataset_name, dataset_root in (("mvtec", MVTEC_ROOT), ("visa", VISA_ROOT)):
 
 if set(DIRECTIONS) != {"normal_to_abnormal", "abnormal_to_normal"}:
     raise ValueError(f"Unexpected DIRECTIONS: {DIRECTIONS}")
-if set(LOSS_MODES) != {"global", "local", "combined"}:
+if not LOSS_MODES or not set(LOSS_MODES) <= {"global", "local", "combined"}:
     raise ValueError(f"Unexpected LOSS_MODES: {LOSS_MODES}")
 
+# Deltas are optimized once into this store no matter which delivery bundles
+# are requested; the path is unchanged so existing artifacts still reuse.
 OUTPUT_ROOT = OUTPUT_BASE / "canonical_clip_per_dataset"
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+BUNDLE_DIRECTORIES = {
+    "same_dataset": OUTPUT_BASE / "canonical_clip_per_dataset",
+    "cross_dataset": OUTPUT_BASE / "canonical_clip_cross_dataset",
+}
+BUNDLE_SCOPES = {"same_dataset": "dataset", "cross_dataset": "cross_dataset"}
 CLIP_CACHE = WORKING / "clip_cache"
 CLIP_CACHE.mkdir(parents=True, exist_ok=True)
 os.environ["ANOMALYCLIP_CLIP_CACHE"] = str(CLIP_CACHE)
@@ -174,6 +191,7 @@ print("Attack-train fractions:", TRAIN_FRACTIONS)
 print("Loss formulation:", LOSS_FORMULATION)
 print("Prompt mode:", PROMPT_MODE)
 print("Source datasets:", SOURCE_DATASETS)
+print("Transfer settings:", TRANSFER_SETTINGS)
 print("Evaluation datasets:", EVALUATION_DATASETS)
 print("Expected optimization runs:", len(SOURCE_DATASETS) * len(TRAIN_FRACTIONS) * len(DIRECTIONS) * len(LOSS_MODES))
 print("Important: each source delta is optimized once and referenced by every evaluation dataset.")
@@ -246,6 +264,7 @@ attack_config = AttackConfig(
     local_dice_smooth=LOCAL_DICE_SMOOTH,
     loss_formulation=LOSS_FORMULATION,
     margin_topk_fraction=MARGIN_TOPK_FRACTIONS["normal_to_abnormal"],
+    gradient_normalization=GRADIENT_NORMALIZATION,
     step_size_schedule=STEP_SIZE_SCHEDULE,
     step_size_min_ratio=STEP_SIZE_MIN_RATIO,
     diagnostic_interval=DIAGNOSTIC_INTERVAL,
@@ -333,6 +352,7 @@ for source_dataset in SOURCE_DATASETS:
                             else "target_class_focal_plus_soft_dice"
                         ),
                         "margin_topk_fraction": MARGIN_TOPK_FRACTIONS[direction],
+                        "gradient_normalization": GRADIENT_NORMALIZATION,
                         "local_focal_weight": LOCAL_FOCAL_WEIGHT,
                         "local_dice_weight": LOCAL_DICE_WEIGHT,
                         "local_focal_gamma": LOCAL_FOCAL_GAMMA,
@@ -452,8 +472,10 @@ for source_dataset in SOURCE_DATASETS:
         del surrogate
         release_cuda()
 
-# One artifact row per optimization; two delivery rows per artifact (one per target).
-delivery_rows = []
+# One artifact row per optimization. Delivery rows are grouped by transfer
+# setting so same-dataset and cross-dataset become independently packaged
+# scopes without ever optimizing the same delta twice.
+delivery_rows = {setting: [] for setting in TRANSFER_SETTINGS}
 unique_noise_paths = []
 for row in artifact_rows:
     artifact = Path(row["artifact_path"])
@@ -469,19 +491,24 @@ for row in artifact_rows:
     relative_noise = artifact.relative_to(OUTPUT_ROOT)
     unique_noise_paths.append(artifact)
     for target_dataset in EVALUATION_DATASETS:
+        setting = (
+            "same_dataset"
+            if row["source_dataset"] == target_dataset
+            else "cross_dataset"
+        )
+        if setting not in delivery_rows:
+            continue
         attacked_eval_ids = sorted(
             s.protocol_id for s in samples
             if s.dataset == target_dataset
             and s.label == row["source_label"]
             and assignments[s.protocol_id] == "evaluation"
         )
-        delivery_rows.append({
-            "scope": "dataset",
+        delivery_rows[setting].append({
+            "scope": BUNDLE_SCOPES[setting],
             "source_dataset": row["source_dataset"],
             "target_dataset": target_dataset,
-            "transfer_setting": (
-                "same_dataset" if row["source_dataset"] == target_dataset else "cross_dataset"
-            ),
+            "transfer_setting": setting,
             "direction": row["direction"],
             "source_label": row["source_label"],
             "target_label": row["target_label"],
@@ -506,6 +533,7 @@ for row in artifact_rows:
             "local_objective": row["local_objective"],
             "global_objective": row["global_objective"],
             "margin_topk_fraction": row["margin_topk_fraction"],
+            "gradient_normalization": row["gradient_normalization"],
             "local_focal_weight": row["local_focal_weight"],
             "local_dice_weight": row["local_dice_weight"],
             "local_focal_gamma": row["local_focal_gamma"],
@@ -522,12 +550,14 @@ for row in artifact_rows:
             ),
         })
 
-attack_manifest_path = OUTPUT_ROOT / "attack_manifest.csv"
-pd.DataFrame(delivery_rows).sort_values(
-    ["attack_train_fraction", "source_dataset", "target_dataset", "direction", "loss_mode"]
-).to_csv(attack_manifest_path, index=False)
-diagnostics_path = OUTPUT_ROOT / "optimization_diagnostics.csv"
-pd.DataFrame([
+empty = [setting for setting, rows in delivery_rows.items() if not rows]
+if empty:
+    raise RuntimeError(
+        f"No delivery rows for {empty}. Check SOURCE_DATASETS and EVALUATION_DATASETS: "
+        "cross_dataset needs an evaluation dataset that is not a source dataset."
+    )
+
+diagnostics_frame = pd.DataFrame([
     {
         "scope": row["scope"],
         "source_dataset": row["source_dataset"],
@@ -535,6 +565,7 @@ pd.DataFrame([
         "direction": row["direction"],
         "loss_mode": row["loss_mode"],
         "loss_formulation": row["loss_formulation"],
+        "gradient_normalization": row["gradient_normalization"],
         "prompt_mode": row["prompt_mode"],
         "initial_total_loss": row["initial_losses"]["total"],
         "final_total_loss": row["final_losses"]["total"],
@@ -555,70 +586,92 @@ pd.DataFrame([
         ),
     }
     for row in artifact_rows
-]).to_csv(diagnostics_path, index=False)
-
-# Keep the uncompressed directory bundle independently evaluable.
-for protocol_path in (ATTACK_TRAIN_CSV, EVALUATION_CSV):
-    shutil.copy2(protocol_path, OUTPUT_ROOT / protocol_path.name)
-
-for required_path in (
-    OUTPUT_ROOT / "attack_manifest.csv",
-    OUTPUT_ROOT / "optimization_diagnostics.csv",
-    OUTPUT_ROOT / "attack_train_indices.csv",
-    OUTPUT_ROOT / "evaluation_test_indices.csv",
-):
-    if not required_path.is_file():
-        raise FileNotFoundError(f"Incomplete directory bundle: {required_path}")
-for delivery in delivery_rows:
-    recorded_noise = OUTPUT_ROOT / Path(str(delivery["noise_file"]))
-    if not recorded_noise.is_file():
-        raise FileNotFoundError(
-            f"Manifest noise path is absent from directory bundle: {recorded_noise}"
-        )
-    if sha256_file(recorded_noise) != delivery["artifact_sha256"]:
-        raise RuntimeError(f"Manifest checksum mismatch: {recorded_noise}")
+])
 
 source_tag = "-".join(SOURCE_DATASETS)
-evaluation_tag = "-".join(EVALUATION_DATASETS)
-dataset_tag = f"{source_tag}_to_{evaluation_tag}"
-archive_path = OUTPUT_BASE / (
-    f"canonical_clip_per_dataset_{dataset_tag}_{SETUP_ID}.zip"
-)
-if archive_path.exists():
-    archive_path.unlink()
-protocol_files = [ATTACK_TRAIN_CSV, EVALUATION_CSV]
-with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
-    for path in protocol_files:
-        archive.write(path, path.name, compress_type=zipfile.ZIP_DEFLATED)
-    archive.write(attack_manifest_path, "attack_manifest.csv", compress_type=zipfile.ZIP_DEFLATED)
-    archive.write(diagnostics_path, "optimization_diagnostics.csv", compress_type=zipfile.ZIP_DEFLATED)
-    for artifact in sorted(set(unique_noise_paths)):
-        archive.write(
-            artifact,
-            artifact.relative_to(OUTPUT_ROOT),
-            compress_type=zipfile.ZIP_STORED,
-        )
+for setting in TRANSFER_SETTINGS:
+    bundle = BUNDLE_DIRECTORIES[setting]
+    rows = delivery_rows[setting]
+    bundle.mkdir(parents=True, exist_ok=True)
 
-with zipfile.ZipFile(archive_path, "r") as archive:
-    archived_names = set(archive.namelist())
-expected_archive_names = {
-    "attack_train_indices.csv",
-    "evaluation_test_indices.csv",
-    "attack_manifest.csv",
-    "optimization_diagnostics.csv",
-    *(str(row["noise_file"]).replace("\\", "/") for row in delivery_rows),
-}
-missing_archive_names = expected_archive_names - archived_names
-if missing_archive_names:
-    raise RuntimeError(
-        f"ZIP bundle is missing entries: {sorted(missing_archive_names)[:5]}"
+    # Every bundle stays independently evaluable, so it carries its own deltas.
+    referenced = sorted({Path(str(row["noise_file"])) for row in rows})
+    for relative in referenced:
+        destination = bundle / relative
+        if destination.resolve() == (OUTPUT_ROOT / relative).resolve():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(OUTPUT_ROOT / relative, destination)
+
+    attack_manifest_path = bundle / "attack_manifest.csv"
+    pd.DataFrame(rows).sort_values(
+        ["attack_train_fraction", "source_dataset", "target_dataset", "direction", "loss_mode"]
+    ).to_csv(attack_manifest_path, index=False)
+    diagnostics_path = bundle / "optimization_diagnostics.csv"
+    diagnostics_frame.assign(scope=BUNDLE_SCOPES[setting]).to_csv(
+        diagnostics_path, index=False
     )
 
+    for protocol_path in (ATTACK_TRAIN_CSV, EVALUATION_CSV):
+        shutil.copy2(protocol_path, bundle / protocol_path.name)
+    for required_path in (
+        attack_manifest_path,
+        diagnostics_path,
+        bundle / "attack_train_indices.csv",
+        bundle / "evaluation_test_indices.csv",
+    ):
+        if not required_path.is_file():
+            raise FileNotFoundError(f"Incomplete directory bundle: {required_path}")
+    for delivery in rows:
+        recorded_noise = bundle / Path(str(delivery["noise_file"]))
+        if not recorded_noise.is_file():
+            raise FileNotFoundError(
+                f"Manifest noise path is absent from directory bundle: {recorded_noise}"
+            )
+        if sha256_file(recorded_noise) != delivery["artifact_sha256"]:
+            raise RuntimeError(f"Manifest checksum mismatch: {recorded_noise}")
+
+    evaluation_tag = "-".join(sorted({str(row["target_dataset"]) for row in rows}))
+    archive_path = OUTPUT_BASE / (
+        f"{bundle.name}_{source_tag}_to_{evaluation_tag}_{SETUP_ID}.zip"
+    )
+    if archive_path.exists():
+        archive_path.unlink()
+    with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
+        for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV):
+            archive.write(path, path.name, compress_type=zipfile.ZIP_DEFLATED)
+        archive.write(
+            attack_manifest_path, "attack_manifest.csv", compress_type=zipfile.ZIP_DEFLATED
+        )
+        archive.write(
+            diagnostics_path,
+            "optimization_diagnostics.csv",
+            compress_type=zipfile.ZIP_DEFLATED,
+        )
+        for relative in referenced:
+            archive.write(
+                bundle / relative, relative.as_posix(), compress_type=zipfile.ZIP_STORED
+            )
+
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        archived_names = set(archive.namelist())
+    expected_archive_names = {
+        "attack_train_indices.csv",
+        "evaluation_test_indices.csv",
+        "attack_manifest.csv",
+        "optimization_diagnostics.csv",
+        *(Path(str(row["noise_file"])).as_posix() for row in rows),
+    }
+    missing_archive_names = expected_archive_names - archived_names
+    if missing_archive_names:
+        raise RuntimeError(
+            f"ZIP bundle is missing entries: {sorted(missing_archive_names)[:5]}"
+        )
+    print(f"\n[{setting}] manifest rows: {len(rows)}  deltas: {len(referenced)}")
+    print(f"[{setting}] ZIP: {archive_path}")
+
 print("\nPer-dataset optimization artifacts:", len(artifact_rows))
-print("Per-dataset evaluation manifest rows:", len(delivery_rows))
 print(
     "Expected optimizations:",
     len(SOURCE_DATASETS) * len(TRAIN_FRACTIONS) * len(DIRECTIONS) * len(LOSS_MODES),
 )
-print("Expected evaluation rows:", len(artifact_rows) * len(EVALUATION_DATASETS))
-print("ZIP:", archive_path)

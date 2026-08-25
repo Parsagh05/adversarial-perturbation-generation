@@ -76,36 +76,25 @@ if [[ ! -f "$SETUP_STAMP" ]]; then
   touch "$SETUP_STAMP"
 fi
 
-SETUP_IDS=(
-  steps500_eps2 steps500_eps4 steps800_eps2 steps800_eps4
-  steps500_eps2_margin_topk steps500_eps4_margin_topk
-  steps800_eps2_margin_topk steps800_eps4_margin_topk
-  steps500_eps2_learnable_prompt steps500_eps4_learnable_prompt
-  steps800_eps2_learnable_prompt steps800_eps4_learnable_prompt
-  steps500_eps2_margin_topk_learnable_prompt
-  steps500_eps4_margin_topk_learnable_prompt
-  steps800_eps2_margin_topk_learnable_prompt
-  steps800_eps4_margin_topk_learnable_prompt
-)
-SETUP_STEPS=(500 500 800 800 500 500 800 800 500 500 800 800 500 500 800 800)
-SETUP_EPS=(2/255 4/255 2/255 4/255 2/255 4/255 2/255 4/255 2/255 4/255 2/255 4/255 2/255 4/255 2/255 4/255)
-SETUP_LOSSES=(
-  ce_focal_dice ce_focal_dice ce_focal_dice ce_focal_dice
-  margin_topk margin_topk margin_topk margin_topk
-  ce_focal_dice ce_focal_dice ce_focal_dice ce_focal_dice
-  margin_topk margin_topk margin_topk margin_topk
-)
-SETUP_PROMPTS=(
-  frozen_winclip frozen_winclip frozen_winclip frozen_winclip
-  frozen_winclip frozen_winclip frozen_winclip frozen_winclip
-  learnable_object_agnostic learnable_object_agnostic
-  learnable_object_agnostic learnable_object_agnostic
-  learnable_object_agnostic learnable_object_agnostic
-  learnable_object_agnostic learnable_object_agnostic
-)
+# The setup matrix is defined once in setup_catalog.py; deriving it here keeps
+# the launcher and audit_generation.py from drifting apart.
+SETUP_TABLE="$(PYTHONPATH="$ROOT" "$PYTHON" - <<'PYEOF'
+from setup_catalog import SETUPS
+for setup_id, setup in SETUPS.items():
+    print("\t".join((
+        setup_id, str(setup.steps), setup.epsilon_label, setup.loss_formulation,
+        setup.prompt_mode, setup.gradient_normalization, ",".join(setup.loss_modes),
+    )))
+PYEOF
+)"
+[[ -n "$SETUP_TABLE" ]] || { echo "Could not read the setup catalog" >&2; exit 2; }
+mapfile -t SETUP_IDS < <(cut -f1 <<< "$SETUP_TABLE")
 
-case "${RUN_PER_DATASET,,},${RUN_PER_CATEGORY,,},${RUN_PER_IMAGE,,}" in
-  false,false,false) echo "At least one attack scope must be enabled" >&2; exit 2 ;;
+case "${RUN_PER_DATASET,,},${RUN_CROSS_DATASET,,},${RUN_PER_CATEGORY,,},${RUN_PER_IMAGE,,}" in
+  false,false,false,false)
+    echo "At least one of the four attack scopes must be enabled" >&2
+    exit 2
+    ;;
 esac
 
 PROMPT_SETUP="${PROMPT_SETUP,,}"
@@ -143,22 +132,22 @@ selected() {
 }
 
 selected_count=0
-for index in "${!SETUP_IDS[@]}"; do
-  if selected "${SETUP_IDS[$index]}" "${SETUP_PROMPTS[$index]}"; then
+while IFS=$'\t' read -r id _ _ _ prompt_mode _ _; do
+  if selected "$id" "$prompt_mode"; then
     selected_count=$((selected_count + 1))
   fi
-done
+done <<< "$SETUP_TABLE"
 [[ "$selected_count" -gt 0 ]] || {
   echo "RUN_SETUPS and PROMPT_SETUP did not select a compatible setup" >&2
   exit 2
 }
 
 learnable_selected=false
-for index in "${!SETUP_IDS[@]}"; do
-  if selected "${SETUP_IDS[$index]}" "${SETUP_PROMPTS[$index]}" && [[ "${SETUP_PROMPTS[$index]}" == "learnable_object_agnostic" ]]; then
+while IFS=$'\t' read -r id _ _ _ prompt_mode _ _; do
+  if selected "$id" "$prompt_mode" && [[ "$prompt_mode" == "learnable_object_agnostic" ]]; then
     learnable_selected=true
   fi
-done
+done <<< "$SETUP_TABLE"
 if [[ "$learnable_selected" == "true" ]]; then
   case ",$SOURCE_DATASETS," in
     *,mvtec,*) [[ -f "$LEARNABLE_PROMPT_MVTEC_CHECKPOINT" ]] || {
@@ -174,13 +163,8 @@ if [[ "$learnable_selected" == "true" ]]; then
   esac
 fi
 
-for index in "${!SETUP_IDS[@]}"; do
-  id="${SETUP_IDS[$index]}"
-  selected "$id" "${SETUP_PROMPTS[$index]}" || continue
-  steps="${SETUP_STEPS[$index]}"
-  epsilon="${SETUP_EPS[$index]}"
-  loss_formulation="${SETUP_LOSSES[$index]}"
-  prompt_mode="${SETUP_PROMPTS[$index]}"
+while IFS=$'\t' read -r id steps epsilon loss_formulation prompt_mode gradient_normalization setup_loss_modes; do
+  selected "$id" "$prompt_mode" || continue
   if [[ "$prompt_mode" == "frozen_winclip" ]]; then
     prompt_folder="frozen_prompt"
   else
@@ -190,7 +174,7 @@ for index in "${!SETUP_IDS[@]}"; do
     steps="$SMOKE_STEPS"
   fi
   setup_root="$PIPELINE_OUTPUT/setups/$prompt_folder/$id"
-  echo "===== SETUP $id: prompt=$prompt_mode loss=$loss_formulation steps=$steps epsilon=$epsilon ====="
+  echo "===== SETUP $id: prompt=$prompt_mode loss=$loss_formulation steps=$steps epsilon=$epsilon gradnorm=$gradient_normalization modes=$setup_loss_modes ====="
   (
     export OUTPUT_BASE="$setup_root"
     export SETUP_ID="$id"
@@ -199,6 +183,10 @@ for index in "${!SETUP_IDS[@]}"; do
     export EVALUATION_CSV="$PROTOCOL_DIR/evaluation_test_indices.csv"
     export EPSILON="$epsilon"
     export LOSS_FORMULATION="$loss_formulation"
+    export GRADIENT_NORMALIZATION="$gradient_normalization"
+    # A setup's loss modes are part of its identity and audit_generation.py
+    # enforces them, so they override any ambient LOSS_MODES value.
+    export LOSS_MODES="$setup_loss_modes"
     export PROMPT_MODE="$prompt_mode"
     export PER_DATASET_STEPS="$steps"
     export PER_CATEGORY_STEPS="$steps"
@@ -220,11 +208,22 @@ for index in "${!SETUP_IDS[@]}"; do
       fi
     }
 
-    run_mode "$RUN_PER_DATASET"  per_dataset  run_per_dataset.py
+    # Same-dataset and cross-dataset share one optimization pass and are
+    # emitted as two independent bundles by run_per_dataset.py.
+    dataset_settings=""
+    [[ "${RUN_PER_DATASET,,}" == "true" ]] && dataset_settings="same_dataset"
+    [[ "${RUN_CROSS_DATASET,,}" == "true" ]] && \
+      dataset_settings="${dataset_settings:+$dataset_settings,}cross_dataset"
+    if [[ -n "$dataset_settings" ]]; then
+      export DATASET_TRANSFER_SETTINGS="$dataset_settings"
+      echo "===== $id/dataset_scopes ($dataset_settings) ====="
+      "$PYTHON" "$ROOT/run_per_dataset.py" 2>&1 | tee "$setup_root/logs/per_dataset.log"
+    fi
+
     run_mode "$RUN_PER_CATEGORY" per_category run_per_category.py
     run_mode "$RUN_PER_IMAGE"    per_image    run_per_image.py
   )
-done
+done <<< "$SETUP_TABLE"
 
 "$PYTHON" "$ROOT/audit_generation.py"
 export PIPELINE_OUTPUT

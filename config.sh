@@ -10,6 +10,11 @@ OUTPUT_BASE="${OUTPUT_BASE:-/ABSOLUTE/PATH/TO/canonical_clip_outputs}"
 # any base ID to load the object-agnostic shallow prompt checkpoint.
 RUN_SETUPS="${RUN_SETUPS:-all}"
 
+# Gradient normalization variants rescale each component gradient to unit L2
+# norm before the 0.2/0.8 weights. Append _gradnorm to any base setup ID.
+# They run the combined loss mode only, because a single-component objective
+# is unchanged by positive rescaling once sign() is taken.
+
 # frozen: run only WinCLIP prompt setups
 # learnable: run only object-agnostic learned-prompt setups
 # both: run both prompt families selected by RUN_SETUPS
@@ -36,7 +41,12 @@ SOURCE_DATASETS="${SOURCE_DATASETS:-mvtec}"
 # are also explicitly listed in SOURCE_DATASETS.
 EVALUATION_DATASETS="${EVALUATION_DATASETS:-mvtec,visa}"
 
+# Same-dataset delivery (mvtec->mvtec). Optimization is shared with
+# RUN_CROSS_DATASET, so enabling both costs one optimization pass, not two.
 RUN_PER_DATASET="${RUN_PER_DATASET:-true}"
+# Cross-dataset delivery (mvtec->visa). Needs an evaluation dataset that is
+# not also a source dataset.
+RUN_CROSS_DATASET="${RUN_CROSS_DATASET:-true}"
 RUN_PER_CATEGORY="${RUN_PER_CATEGORY:-true}"
 RUN_PER_IMAGE="${RUN_PER_IMAGE:-true}"
 

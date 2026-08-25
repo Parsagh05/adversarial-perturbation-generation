@@ -28,6 +28,7 @@ export EVALUATION_DATASETS=mvtec,visa
 export RUN_SETUPS=steps500_eps2
 export PROMPT_SETUP=frozen
 export RUN_PER_DATASET=true
+export RUN_CROSS_DATASET=true
 export RUN_PER_CATEGORY=false
 export RUN_PER_IMAGE=false
 export SMOKE_TEST=true
@@ -78,6 +79,7 @@ export EVALUATION_DATASETS=mvtec,visa
 export RUN_SETUPS=all
 export PROMPT_SETUP=both
 export RUN_PER_DATASET=true
+export RUN_CROSS_DATASET=true
 export RUN_PER_CATEGORY=true
 export RUN_PER_IMAGE=true
 export ATTACK_TRAIN_FRACTION=1.0
@@ -97,6 +99,11 @@ Combined archive: <OUTPUT_BASE>/full_outputs.zip
 
 Outputs for each setup are under:
 
+Each setup directory holds one bundle per enabled scope:
+`canonical_clip_per_dataset`, `canonical_clip_cross_dataset`,
+`canonical_clip_per_category`, `canonical_clip_per_image`. The first two share a
+single optimization pass.
+
 ```text
 <OUTPUT_BASE>/setups/frozen_prompt/<frozen_setup_id>/
 <OUTPUT_BASE>/setups/learnable_prompt/<learnable_setup_id>/
@@ -109,6 +116,7 @@ per-scope ZIP files already stored inside individual setup directories.
 The legacy setup IDs are `steps500_eps2`, `steps500_eps4`, `steps800_eps2`, and
 `steps800_eps4`. The new loss has four separate setup IDs formed by appending
 `_margin_topk` to each legacy ID. Every one of those eight frozen-prompt IDs has
-a learnable counterpart formed by appending `_learnable_prompt`, for 16 setups
-in total. The learned contexts are shallow and object-agnostic; the pipeline
+a learnable counterpart formed by appending `_learnable_prompt`. Appending `_gradnorm` to a base ID selects the
+gradient-normalized counterpart, which runs the `combined` loss mode only, for
+32 setups in total. The learned contexts are shallow and object-agnostic; the pipeline
 does not perform AnomalyCLIP-style deep text-token tuning.

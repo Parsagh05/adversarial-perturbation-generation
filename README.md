@@ -97,6 +97,30 @@ width, `category_specific=false`, and `deep_text_prompt_tuning=false`. The
 checkpoint SHA-256, epoch, suffixes, and prompt configuration are recorded in
 every artifact and manifest.
 
+## Gradient-normalized component balance
+
+`global_weight` and `local_weight` (0.2/0.8) are applied to two loss families
+whose raw magnitudes differ by orders of magnitude, so the configured 4:1
+balance does not describe the balance the update actually sees. Measured on the
+frozen 500-step runs, the realized local:global gradient-norm ratio ranges from
+0.69x to 2.97x across directions and formulations.
+
+Every base setup therefore has a `_gradnorm` counterpart that rescales each
+component gradient to unit L2 norm before the weights are applied:
+
+```
+gradient = global_weight * g_global / ||g_global||
+         + local_weight  * g_local  / ||g_local||
+```
+
+The realized ratio is then exactly `local_weight / global_weight` in every
+direction and formulation. Both component gradients are already materialized by
+the combined path, so this costs no extra backward pass.
+
+`_gradnorm` setups run the `combined` loss mode only. A single-component
+objective is unchanged by any positive rescaling once `sign()` is taken, so
+their `global` and `local` results would duplicate the base setup exactly.
+
 ## Relaxed margin/TopK objective
 
 The four original setup IDs keep the segmentation-aware loss above. Four new
@@ -180,8 +204,14 @@ required on Kaggle images where `venv`/`ensurepip` may be unavailable. Set
 if its `pip` bootstrap fails, the launcher safely falls back to the active
 interpreter. `PYTHON_BIN` can select a specific interpreter explicitly.
 
-The three modes can be selected independently with `RUN_PER_DATASET`,
-`RUN_PER_CATEGORY`, and `RUN_PER_IMAGE`. Long Kaggle runs should normally run
+The four scopes can be selected independently with `RUN_PER_DATASET`,
+`RUN_CROSS_DATASET`, `RUN_PER_CATEGORY`, and `RUN_PER_IMAGE`.
+
+`RUN_PER_DATASET` delivers a universal delta to held-out images of its own
+source dataset; `RUN_CROSS_DATASET` delivers the same delta to the other
+dataset. They share one optimization pass, so enabling both costs no more GPU
+time than enabling either alone, and each writes a self-contained bundle with
+its own copy of the deltas. Long Kaggle runs should normally run
 one scope per session. Existing `.pt` files are safely resumed only when every
 reproducibility field matches.
 
@@ -211,6 +241,11 @@ the same base ID runs both prompt variants.
 | `steps500_eps4_margin_topk` | relaxed `margin_topk` | 500 | 4/255 |
 | `steps800_eps2_margin_topk` | relaxed `margin_topk` | 800 | 2/255 |
 | `steps800_eps4_margin_topk` | relaxed `margin_topk` | 800 | 4/255 |
+
+Append `_gradnorm` to any of the eight base IDs for the gradient-normalized
+counterpart, which keeps the same loss, steps, and epsilon and runs `combined`
+only. Combined with the prompt families, `RUN_SETUPS=all PROMPT_SETUP=both`
+therefore runs 32 isolated setups.
 
 Each base ID above uses frozen WinCLIP prompts. Append `_learnable_prompt` to
 any base ID to run exactly the same loss, steps, epsilon, and attack scopes with
@@ -244,6 +279,7 @@ Each setup directory contains its own protocol CSVs, logs, uncompressed
 bundles, and archives:
 
 - `canonical_clip_per_dataset/`
+- `canonical_clip_cross_dataset/`
 - `canonical_clip_per_category/`
 - `canonical_clip_per_image/`
 - `canonical_clip_per_dataset_<datasets>_<setup_id>.zip`
