@@ -99,8 +99,6 @@ def audit_scope(
     expected_epsilon: float,
     expected_loss_formulation: str,
     expected_prompt_mode: str,
-    expected_gradient_normalization: str,
-    expected_loss_modes: tuple[str, ...],
 ) -> set[str]:
     bundle = setup_root / bundle_name
     manifest_path = bundle / "attack_manifest.csv"
@@ -138,17 +136,6 @@ def audit_scope(
     )
     if set(prompt_modes) != {expected_prompt_mode}:
         raise RuntimeError(f"Wrong prompt mode in {manifest_path}")
-    normalizations = (
-        manifest.gradient_normalization.fillna("none").astype(str)
-        if "gradient_normalization" in manifest.columns
-        else pd.Series("none", index=manifest.index)
-    )
-    if set(normalizations) != {expected_gradient_normalization}:
-        raise RuntimeError(f"Wrong gradient normalization in {manifest_path}")
-    if set(manifest.loss_mode.astype(str)) != set(expected_loss_modes):
-        raise RuntimeError(
-            f"Expected loss modes {sorted(expected_loss_modes)} in {manifest_path}"
-        )
     if expected_prompt_mode == "learnable_object_agnostic":
         required_prompt_columns = {
             "prompt_checkpoint_sha256",
@@ -239,8 +226,6 @@ def main() -> None:
                         setup.epsilon,
                         setup.loss_formulation,
                         setup.prompt_mode,
-                        setup.gradient_normalization,
-                        setup.loss_modes,
                     )
                 )
     if len(protocol_hashes) != 1:

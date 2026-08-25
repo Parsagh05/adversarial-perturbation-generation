@@ -97,30 +97,6 @@ width, `category_specific=false`, and `deep_text_prompt_tuning=false`. The
 checkpoint SHA-256, epoch, suffixes, and prompt configuration are recorded in
 every artifact and manifest.
 
-## Gradient-normalized component balance
-
-`global_weight` and `local_weight` (0.2/0.8) are applied to two loss families
-whose raw magnitudes differ by orders of magnitude, so the configured 4:1
-balance does not describe the balance the update actually sees. Measured on the
-frozen 500-step runs, the realized local:global gradient-norm ratio ranges from
-0.69x to 2.97x across directions and formulations.
-
-Every base setup therefore has a `_gradnorm` counterpart that rescales each
-component gradient to unit L2 norm before the weights are applied:
-
-```
-gradient = global_weight * g_global / ||g_global||
-         + local_weight  * g_local  / ||g_local||
-```
-
-The realized ratio is then exactly `local_weight / global_weight` in every
-direction and formulation. Both component gradients are already materialized by
-the combined path, so this costs no extra backward pass.
-
-`_gradnorm` setups run the `combined` loss mode only. A single-component
-objective is unchanged by any positive rescaling once `sign()` is taken, so
-their `global` and `local` results would duplicate the base setup exactly.
-
 ## Relaxed margin/TopK objective
 
 The four original setup IDs keep the segmentation-aware loss above. Four new
@@ -241,11 +217,6 @@ the same base ID runs both prompt variants.
 | `steps500_eps4_margin_topk` | relaxed `margin_topk` | 500 | 4/255 |
 | `steps800_eps2_margin_topk` | relaxed `margin_topk` | 800 | 2/255 |
 | `steps800_eps4_margin_topk` | relaxed `margin_topk` | 800 | 4/255 |
-
-Append `_gradnorm` to any of the eight base IDs for the gradient-normalized
-counterpart, which keeps the same loss, steps, and epsilon and runs `combined`
-only. Combined with the prompt families, `RUN_SETUPS=all PROMPT_SETUP=both`
-therefore runs 32 isolated setups.
 
 Each base ID above uses frozen WinCLIP prompts. Append `_learnable_prompt` to
 any base ID to run exactly the same loss, steps, epsilon, and attack scopes with

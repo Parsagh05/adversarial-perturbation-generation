@@ -13,7 +13,6 @@ VALID_DIRECTIONS = ("normal_to_abnormal", "abnormal_to_normal")
 VALID_LOSS_MODES = ("global", "local", "combined")
 VALID_LOSS_FORMULATIONS = ("ce_focal_dice", "margin_topk")
 VALID_STEP_SIZE_SCHEDULES = ("constant", "cosine")
-VALID_GRADIENT_NORMALIZATIONS = ("none", "l2")
 VALID_NORMAL_LOCAL_TARGETS = ("fixed_region", "full_image")
 VALID_UNIVERSAL_PROTOCOLS = ("transductive", "held_out")
 VALID_THRESHOLD_MODES = ("normal_train_quantile",)
@@ -60,12 +59,6 @@ class AttackConfig:
     local_dice_smooth: float = 1.0
     loss_formulation: str = "ce_focal_dice"
     margin_topk_fraction: float = 0.20
-    # "l2" rescales each component's gradient to unit norm before the
-    # global/local weights are applied, so 0.2/0.8 describes the influence on
-    # the update rather than the raw magnitudes of two different loss families.
-    # Only "combined" is affected: a single-component objective is unchanged by
-    # any positive rescaling once ``sign()`` is taken.
-    gradient_normalization: str = "none"
     step_size_schedule: str = "constant"
     step_size_min_ratio: float = 0.1
     diagnostic_interval: int = 10
@@ -140,12 +133,6 @@ class AttackConfig:
             )
         if not 0.0 < self.margin_topk_fraction <= 1.0:
             raise ValueError("margin_topk_fraction must be in (0, 1]")
-        self.gradient_normalization = str(self.gradient_normalization)
-        if self.gradient_normalization not in VALID_GRADIENT_NORMALIZATIONS:
-            raise ValueError(
-                "gradient_normalization must be one of "
-                f"{VALID_GRADIENT_NORMALIZATIONS}, got {self.gradient_normalization!r}"
-            )
         self.step_size_schedule = str(self.step_size_schedule)
         if self.step_size_schedule not in VALID_STEP_SIZE_SCHEDULES:
             raise ValueError(

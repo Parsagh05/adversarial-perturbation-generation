@@ -271,19 +271,6 @@ class TargetedPGD:
             )
         return result
 
-    def _combine_gradients(
-        self, global_gradient: torch.Tensor, local_gradient: torch.Tensor
-    ) -> torch.Tensor:
-        """Weight the two component gradients, optionally after L2 normalization."""
-
-        if self.config.gradient_normalization == "l2":
-            global_gradient = global_gradient / global_gradient.norm().clamp_min(1e-12)
-            local_gradient = local_gradient / local_gradient.norm().clamp_min(1e-12)
-        return (
-            self.config.global_weight * global_gradient
-            + self.config.local_weight * local_gradient
-        )
-
     def step_size_at(self, step: int, total_steps: int) -> float:
         """Return the configured PGD step size for a zero-based iteration."""
 
@@ -442,34 +429,18 @@ class TargetedPGD:
         for step in range(self.config.steps):
             delta.requires_grad_(True)
             adversarial = (clean + delta).clamp(0.0, 1.0)
-            split = (
-                mode == "combined"
-                and self.config.gradient_normalization != "none"
-            )
-            components = self.objective_components(
+            loss = self.objective(
                 adversarial,
                 categories,
                 target_label,
                 mode,
                 spatial_masks=masks,
             )
-            loss = components["total"]
             current_loss = float(loss.detach())
             if current_loss < best_loss:
                 best_loss = current_loss
                 best_delta = delta.detach().clone()
-            if split:
-                gradient = self._combine_gradients(
-                    torch.autograd.grad(
-                        components["global"], delta, retain_graph=True,
-                        only_inputs=True,
-                    )[0],
-                    torch.autograd.grad(
-                        components["local"], delta, only_inputs=True
-                    )[0],
-                )
-            else:
-                gradient = torch.autograd.grad(loss, delta, only_inputs=True)[0]
+            gradient = torch.autograd.grad(loss, delta, only_inputs=True)[0]
             # Targeted PGD minimizes the requested global/local objective.
             step_size = self.step_size_at(step, self.config.steps)
             delta = delta.detach() - step_size * gradient.sign()
@@ -584,7 +555,10 @@ class TargetedPGD:
                 )[0]
                 global_gradient_norm = float(global_gradient.norm().detach())
                 local_gradient_norm = float(local_gradient.norm().detach())
-                gradient = self._combine_gradients(global_gradient, local_gradient)
+                gradient = (
+                    self.config.global_weight * global_gradient
+                    + self.config.local_weight * local_gradient
+                )
             else:
                 gradient = torch.autograd.grad(
                     components["total"], delta, only_inputs=True

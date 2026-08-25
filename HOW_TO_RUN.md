@@ -116,7 +116,6 @@ per-scope ZIP files already stored inside individual setup directories.
 The legacy setup IDs are `steps500_eps2`, `steps500_eps4`, `steps800_eps2`, and
 `steps800_eps4`. The new loss has four separate setup IDs formed by appending
 `_margin_topk` to each legacy ID. Every one of those eight frozen-prompt IDs has
-a learnable counterpart formed by appending `_learnable_prompt`. Appending `_gradnorm` to a base ID selects the
-gradient-normalized counterpart, which runs the `combined` loss mode only, for
-32 setups in total. The learned contexts are shallow and object-agnostic; the pipeline
+a learnable counterpart formed by appending `_learnable_prompt`, for 16 setups
+in total. The learned contexts are shallow and object-agnostic; the pipeline
 does not perform AnomalyCLIP-style deep text-token tuning.

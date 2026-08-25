@@ -82,8 +82,8 @@ SETUP_TABLE="$(PYTHONPATH="$ROOT" "$PYTHON" - <<'PYEOF'
 from setup_catalog import SETUPS
 for setup_id, setup in SETUPS.items():
     print("\t".join((
-        setup_id, str(setup.steps), setup.epsilon_label, setup.loss_formulation,
-        setup.prompt_mode, setup.gradient_normalization, ",".join(setup.loss_modes),
+        setup_id, str(setup.steps), setup.epsilon_label,
+        setup.loss_formulation, setup.prompt_mode,
     )))
 PYEOF
 )"
@@ -132,7 +132,7 @@ selected() {
 }
 
 selected_count=0
-while IFS=$'\t' read -r id _ _ _ prompt_mode _ _; do
+while IFS=$'\t' read -r id _ _ _ prompt_mode; do
   if selected "$id" "$prompt_mode"; then
     selected_count=$((selected_count + 1))
   fi
@@ -143,7 +143,7 @@ done <<< "$SETUP_TABLE"
 }
 
 learnable_selected=false
-while IFS=$'\t' read -r id _ _ _ prompt_mode _ _; do
+while IFS=$'\t' read -r id _ _ _ prompt_mode; do
   if selected "$id" "$prompt_mode" && [[ "$prompt_mode" == "learnable_object_agnostic" ]]; then
     learnable_selected=true
   fi
@@ -163,7 +163,7 @@ if [[ "$learnable_selected" == "true" ]]; then
   esac
 fi
 
-while IFS=$'\t' read -r id steps epsilon loss_formulation prompt_mode gradient_normalization setup_loss_modes; do
+while IFS=$'\t' read -r id steps epsilon loss_formulation prompt_mode; do
   selected "$id" "$prompt_mode" || continue
   if [[ "$prompt_mode" == "frozen_winclip" ]]; then
     prompt_folder="frozen_prompt"
@@ -174,7 +174,7 @@ while IFS=$'\t' read -r id steps epsilon loss_formulation prompt_mode gradient_n
     steps="$SMOKE_STEPS"
   fi
   setup_root="$PIPELINE_OUTPUT/setups/$prompt_folder/$id"
-  echo "===== SETUP $id: prompt=$prompt_mode loss=$loss_formulation steps=$steps epsilon=$epsilon gradnorm=$gradient_normalization modes=$setup_loss_modes ====="
+  echo "===== SETUP $id: prompt=$prompt_mode loss=$loss_formulation steps=$steps epsilon=$epsilon ====="
   (
     export OUTPUT_BASE="$setup_root"
     export SETUP_ID="$id"
@@ -183,10 +183,6 @@ while IFS=$'\t' read -r id steps epsilon loss_formulation prompt_mode gradient_n
     export EVALUATION_CSV="$PROTOCOL_DIR/evaluation_test_indices.csv"
     export EPSILON="$epsilon"
     export LOSS_FORMULATION="$loss_formulation"
-    export GRADIENT_NORMALIZATION="$gradient_normalization"
-    # A setup's loss modes are part of its identity and audit_generation.py
-    # enforces them, so they override any ambient LOSS_MODES value.
-    export LOSS_MODES="$setup_loss_modes"
     export PROMPT_MODE="$prompt_mode"
     export PER_DATASET_STEPS="$steps"
     export PER_CATEGORY_STEPS="$steps"
