@@ -223,6 +223,31 @@ any base ID to run exactly the same loss, steps, epsilon, and attack scopes with
 the object-agnostic learned checkpoint. Thus `RUN_SETUPS=all` runs 16 isolated
 setups: eight frozen and eight learnable.
 
+### Setup IDs are derived, not stored
+
+A setup ID is a pure function of the settings that change the work, so a run
+can never be filed under a name describing different parameters:
+
+```
+steps + epsilon + [margin_topk] + [trainNN] + [learnable_prompt]
+```
+
+Overriding the step count renames the output on its own. `SMOKE_STEPS=1200`
+against `steps500_eps4_margin_topk` writes to `steps1200_eps4_margin_topk`,
+and `audit_generation.py` applies the same derivation, so it looks where the
+run actually wrote.
+
+`ATTACK_TRAIN_FRACTION` is folded in the same way: any value below 1.00 adds a
+`_trainNN` component, so a 20% run lands in `..._train20` and cannot overwrite
+or pool with the 100% run. A full run adds nothing, keeping existing names.
+
+Do not set `PER_DATASET_STEPS` or the other per-scope step variables directly.
+They bypass the derivation and change the work without changing the name.
+Other knobs (step size, loss weights, batch sizes, TopK fractions) are not in
+the ID; they are recorded in every artifact's metadata and checked by the
+reuse guard, so they are safe within one output tree but not across merged
+trees.
+
 The selected step count and epsilon are applied consistently to every enabled
 scope: per-dataset, per-category, and per-image. On Kaggle, select one setup,
 one dataset, and normally one scope per saved session. Per-image generation is

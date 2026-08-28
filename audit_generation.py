@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from setup_catalog import SETUPS
+from setup_catalog import SETUPS, effective_setup_id
 
 
 ROOT = Path(os.environ["OUTPUT_BASE"]).expanduser().resolve()
@@ -20,6 +20,7 @@ SMOKE = os.environ.get("SMOKE_TEST", "false").lower() in {
     "1", "true", "yes", "on"
 }
 SMOKE_STEPS = int(os.environ.get("SMOKE_STEPS", "2"))
+ATTACK_TRAIN_FRACTION = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 
 SCOPES = {
     "dataset": (
@@ -208,12 +209,16 @@ def main() -> None:
     for setup_id in selected_setups():
         setup = SETUPS[setup_id]
         expected_steps = SMOKE_STEPS if SMOKE else setup.steps
+        # Same derivation as train.sh, so the audit looks where the run wrote.
+        effective_id = effective_setup_id(
+            setup, expected_steps, ATTACK_TRAIN_FRACTION
+        )
         prompt_folder = (
             "frozen_prompt"
             if setup.prompt_mode == "frozen_winclip"
             else "learnable_prompt"
         )
-        setup_root = ROOT / "setups" / prompt_folder / setup_id
+        setup_root = ROOT / "setups" / prompt_folder / effective_id
         audit_protocol(setup_root)
         for scope, (flag, bundle_name) in SCOPES.items():
             if enabled(flag):

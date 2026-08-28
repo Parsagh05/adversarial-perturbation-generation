@@ -25,6 +25,8 @@ EVALUATION_FRACTION="${EVALUATION_FRACTION:-0.50}"
 
 # Fraction used from the attack_train half. Use one value per run.
 # Later change it to 0.05, 0.10, 0.25, 0.50, or 1.00 for data-efficiency.
+# Any value below 1.00 is folded into the setup ID (0.20 -> _train20), so
+# runs at different fractions cannot overwrite or pool with each other.
 ATTACK_TRAIN_FRACTION="${ATTACK_TRAIN_FRACTION:-1.00}"
 
 # Only these datasets may contribute attack-training images. Per-category and

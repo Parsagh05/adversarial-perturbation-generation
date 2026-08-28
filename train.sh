@@ -79,11 +79,20 @@ fi
 # The setup matrix is defined once in setup_catalog.py; deriving it here keeps
 # the launcher and audit_generation.py from drifting apart.
 SETUP_TABLE="$(PYTHONPATH="$ROOT" "$PYTHON" - <<'PYEOF'
-from setup_catalog import SETUPS
+import os
+from setup_catalog import SETUPS, effective_setup_id
+
+# The effective steps and train fraction are known before any setup runs,
+# so the output name is resolved here rather than after an override.
+smoke = os.environ.get("SMOKE_TEST", "false").strip().lower() in {"1", "true", "yes", "on"}
+override = int(os.environ["SMOKE_STEPS"]) if smoke else None
+fraction = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 for setup_id, setup in SETUPS.items():
+    steps = setup.steps if override is None else override
     print("\t".join((
-        setup_id, str(setup.steps), setup.epsilon_label,
+        setup_id, str(steps), setup.epsilon_label,
         setup.loss_formulation, setup.prompt_mode,
+        effective_setup_id(setup, steps, fraction),
     )))
 PYEOF
 )"
@@ -163,21 +172,20 @@ if [[ "$learnable_selected" == "true" ]]; then
   esac
 fi
 
-while IFS=$'\t' read -r id steps epsilon loss_formulation prompt_mode; do
+while IFS=$'\t' read -r id steps epsilon loss_formulation prompt_mode effective_id; do
   selected "$id" "$prompt_mode" || continue
   if [[ "$prompt_mode" == "frozen_winclip" ]]; then
     prompt_folder="frozen_prompt"
   else
     prompt_folder="learnable_prompt"
   fi
-  if [[ "${SMOKE_TEST,,}" == "true" ]]; then
-    steps="$SMOKE_STEPS"
-  fi
-  setup_root="$PIPELINE_OUTPUT/setups/$prompt_folder/$id"
-  echo "===== SETUP $id: prompt=$prompt_mode loss=$loss_formulation steps=$steps epsilon=$epsilon ====="
+  # $steps already carries the smoke override, and $effective_id is derived
+  # from it, so the directory name can never describe different parameters.
+  setup_root="$PIPELINE_OUTPUT/setups/$prompt_folder/$effective_id"
+  echo "===== SETUP $effective_id (requested $id): prompt=$prompt_mode loss=$loss_formulation steps=$steps epsilon=$epsilon fraction=$ATTACK_TRAIN_FRACTION ====="
   (
     export OUTPUT_BASE="$setup_root"
-    export SETUP_ID="$id"
+    export SETUP_ID="$effective_id"
     export PROTOCOL_DIR="$setup_root/protocol"
     export ATTACK_TRAIN_CSV="$PROTOCOL_DIR/attack_train_indices.csv"
     export EVALUATION_CSV="$PROTOCOL_DIR/evaluation_test_indices.csv"
