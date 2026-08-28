@@ -223,6 +223,24 @@ any base ID to run exactly the same loss, steps, epsilon, and attack scopes with
 the object-agnostic learned checkpoint. Thus `RUN_SETUPS=all` runs 16 isolated
 setups: eight frozen and eight learnable.
 
+### The setup matrix is a grid, not a list
+
+`setup_catalog.py` generates the matrix as the Cartesian product of four
+lists, so widening a sweep means editing one of them rather than writing new
+entries:
+
+| List | Default | Override |
+|---|---|---|
+| step counts | `500, 800` | `SETUP_STEPS="500,800,1200"` |
+| Linf budgets | `2/255, 4/255` | `SETUP_EPSILONS="2/255,4/255,8/255"` |
+| loss formulations | `ce_focal_dice, margin_topk` | fixed |
+| prompt families | `frozen_winclip, learnable_object_agnostic` | fixed |
+
+The defaults reproduce the original 16 setups exactly. `SETUP_STEPS="1200"`
+gives 8 setups all named `steps1200_*`; `SETUP_STEPS="500,800,1200"` gives 24.
+Because IDs are derived, generated entries name themselves and nothing else
+needs editing.
+
 ### Setup IDs are derived, not stored
 
 A setup ID is a pure function of the settings that change the work, so a run
@@ -235,7 +253,9 @@ steps + epsilon + [margin_topk] + [trainNN] + [learnable_prompt]
 Overriding the step count renames the output on its own. `SMOKE_STEPS=1200`
 against `steps500_eps4_margin_topk` writes to `steps1200_eps4_margin_topk`,
 and `audit_generation.py` applies the same derivation, so it looks where the
-run actually wrote.
+run actually wrote. When an override makes two catalog rows resolve to
+the same name, the launcher keeps the first and reports the collapse instead
+of letting them overwrite each other.
 
 `ATTACK_TRAIN_FRACTION` is folded in the same way: any value below 1.00 adds a
 `_trainNN` component, so a 20% run lands in `..._train20` and cannot overwrite

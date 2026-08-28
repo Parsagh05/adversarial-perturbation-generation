@@ -8,6 +8,13 @@ OUTPUT_BASE="${OUTPUT_BASE:-/ABSOLUTE/PATH/TO/canonical_clip_outputs}"
 # all, or a comma-separated subset of 16 isolated setups. Eight base IDs cover
 # loss/steps/epsilon with frozen WinCLIP prompts; append _learnable_prompt to
 # any base ID to load the object-agnostic shallow prompt checkpoint.
+# The setup matrix is the Cartesian product of these two lists with the two
+# loss formulations and the two prompt families. Widen a sweep by editing one
+# list: SETUP_STEPS="500,800,1200" adds a third step count everywhere at once.
+# Setup IDs are derived from these values, so new entries name themselves.
+SETUP_STEPS="${SETUP_STEPS:-500,800}"
+SETUP_EPSILONS="${SETUP_EPSILONS:-2/255,4/255}"
+
 RUN_SETUPS="${RUN_SETUPS:-all}"
 
 # frozen: run only WinCLIP prompt setups

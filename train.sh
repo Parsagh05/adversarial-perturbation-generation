@@ -80,6 +80,7 @@ fi
 # the launcher and audit_generation.py from drifting apart.
 SETUP_TABLE="$(PYTHONPATH="$ROOT" "$PYTHON" - <<'PYEOF'
 import os
+import sys
 from setup_catalog import SETUPS, effective_setup_id
 
 # The effective steps and train fraction are known before any setup runs,
@@ -87,12 +88,23 @@ from setup_catalog import SETUPS, effective_setup_id
 smoke = os.environ.get("SMOKE_TEST", "false").strip().lower() in {"1", "true", "yes", "on"}
 override = int(os.environ["SMOKE_STEPS"]) if smoke else None
 fraction = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
+produced = {}
 for setup_id, setup in SETUPS.items():
     steps = setup.steps if override is None else override
+    effective = effective_setup_id(setup, steps, fraction)
+    if effective in produced:
+        # A single step override collapses every step count onto one name, so
+        # distinct catalog rows would otherwise overwrite each other's output.
+        print(
+            f"note: {setup_id} collapses onto {effective}, already covered by "
+            f"{produced[effective]}; skipping the duplicate",
+            file=sys.stderr,
+        )
+        continue
+    produced[effective] = setup_id
     print("\t".join((
         setup_id, str(steps), setup.epsilon_label,
-        setup.loss_formulation, setup.prompt_mode,
-        effective_setup_id(setup, steps, fraction),
+        setup.loss_formulation, setup.prompt_mode, effective,
     )))
 PYEOF
 )"

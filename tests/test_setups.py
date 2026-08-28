@@ -6,8 +6,16 @@ import re
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
-from setup_catalog import SETUPS, compose_setup_id, effective_setup_id
+from setup_catalog import (
+    SETUPS,
+    build_setups,
+    compose_setup_id,
+    effective_setup_id,
+    epsilon_grid,
+    step_grid,
+)
 
 
 def _launcher_table(**overrides: str) -> list[list[str]]:
@@ -129,6 +137,52 @@ class DerivedSetupIdTests(unittest.TestCase):
         self.assertEqual(len(names), 2 * 2 * 2 * 2 * 2)
 
 
+class SetupGridTests(unittest.TestCase):
+    """The matrix is generated from parameter lists, not written out by hand."""
+
+    def test_default_grid_reproduces_the_historical_matrix(self) -> None:
+        self.assertEqual(step_grid(), (500, 800))
+        self.assertEqual(epsilon_grid(), ("2/255", "4/255"))
+        self.assertEqual(len(SETUPS), 16)
+
+    def test_adding_a_step_count_widens_every_family_at_once(self) -> None:
+        widened = build_setups(steps_grid=(500, 800, 1200), epsilons=("2/255", "4/255"))
+        self.assertEqual(len(widened), 24)
+        for loss_suffix in ("", "_margin_topk"):
+            for prompt_suffix in ("", "_learnable_prompt"):
+                for epsilon in ("eps2", "eps4"):
+                    name = f"steps1200_{epsilon}{loss_suffix}{prompt_suffix}"
+                    with self.subTest(name=name):
+                        self.assertIn(name, widened)
+                        self.assertEqual(widened[name].steps, 1200)
+
+    def test_a_single_step_count_halves_the_matrix(self) -> None:
+        narrowed = build_setups(steps_grid=(1200,), epsilons=("2/255", "4/255"))
+        self.assertEqual(len(narrowed), 8)
+        self.assertTrue(all(setup.steps == 1200 for setup in narrowed.values()))
+        self.assertTrue(all(name.startswith("steps1200_") for name in narrowed))
+
+    def test_epsilon_grid_widens_the_same_way(self) -> None:
+        widened = build_setups(steps_grid=(500,), epsilons=("2/255", "4/255", "8/255"))
+        self.assertEqual(len(widened), 12)
+        self.assertIn("steps500_eps8_margin_topk", widened)
+        self.assertAlmostEqual(widened["steps500_eps8_margin_topk"].epsilon, 8 / 255)
+
+    def test_generated_entries_are_self_naming(self) -> None:
+        for grid in ((300,), (500, 800), (100, 1200, 2000)):
+            generated = build_setups(steps_grid=grid, epsilons=("1/255", "16/255"))
+            for setup_id, setup in generated.items():
+                with self.subTest(setup_id=setup_id):
+                    self.assertEqual(effective_setup_id(setup), setup_id)
+
+    def test_grid_rejects_duplicates_and_non_positive_steps(self) -> None:
+        for value in ("500,500", "0", "-100"):
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {"SETUP_STEPS": value}):
+                    with self.assertRaises(ValueError):
+                        step_grid()
+
+
 class ShellLauncherTests(unittest.TestCase):
     def test_launcher_derives_the_table_from_the_catalog(self) -> None:
         script = (Path(__file__).resolve().parents[1] / "train.sh").read_text(
@@ -151,6 +205,10 @@ class ShellLauncherTests(unittest.TestCase):
         """The bug this guards: smoke steps changed the work but not the name."""
 
         rows = _launcher_table(SMOKE_TEST="true", SMOKE_STEPS="1200")
+        # 500 and 800 both become 1200, so the matrix must collapse rather than
+        # emit two rows that would overwrite each other's output directory.
+        self.assertEqual(len(rows), len(SETUPS) // len(step_grid()))
+        self.assertEqual(len({row[5] for row in rows}), len(rows))
         for row in rows:
             requested, steps, effective = row[0], row[1], row[5]
             with self.subTest(requested=requested):
