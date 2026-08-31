@@ -694,6 +694,8 @@ for row in artifact_rows:
         "target_label": row["target_label"],
         "loss_mode": row["loss_mode"],
         "loss_formulation": row["loss_formulation"],
+        "seed": row["seed"],
+        "run_seed": row["run_seed"],
         **{field: row[field] for field in PROMPT_PROVENANCE_FIELDS},
         "attack_train_fraction": row["attack_train_fraction"],
         "attack_train_image_count": row["attack_train_sample_count"],

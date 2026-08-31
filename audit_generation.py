@@ -20,6 +20,7 @@ SMOKE = os.environ.get("SMOKE_TEST", "false").lower() in {
     "1", "true", "yes", "on"
 }
 SMOKE_STEPS = int(os.environ.get("SMOKE_STEPS", "2"))
+EXPECTED_ATTACK_SEED = int(os.environ.get("ATTACK_SEED", "111"))
 ATTACK_TRAIN_FRACTION = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 
 SCOPES = {
@@ -137,6 +138,13 @@ def audit_scope(
     )
     if set(prompt_modes) != {expected_prompt_mode}:
         raise RuntimeError(f"Wrong prompt mode in {manifest_path}")
+    required_replicate_columns = {"seed", "run_seed", "artifact_sha256"}
+    if not required_replicate_columns.issubset(manifest.columns):
+        raise RuntimeError(f"Missing seed/checksum provenance in {manifest_path}")
+    if set(manifest.seed.astype(int)) != {EXPECTED_ATTACK_SEED}:
+        raise RuntimeError(f"Wrong attack seed in {manifest_path}")
+    if manifest.run_seed.isna().any():
+        raise RuntimeError(f"Missing condition seed in {manifest_path}")
     if expected_prompt_mode == "learnable_object_agnostic":
         required_prompt_columns = {
             "prompt_checkpoint_sha256",

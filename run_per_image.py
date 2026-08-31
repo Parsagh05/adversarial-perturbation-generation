@@ -81,6 +81,11 @@ def seed_everything(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def condition_seed(base: int, *parts: object) -> int:
+    digest = hashlib.sha256("|".join(map(str, (base, *parts))).encode()).digest()
+    return int.from_bytes(digest[:4], "big")
+
+
 def git_commit(path: Path) -> str:
     try:
         return subprocess.check_output(
@@ -415,6 +420,9 @@ for dataset_name in DATASETS:
                 if not attacked_eval:
                     raise RuntimeError(f"No evaluation images for {dataset_name}/{category}/{direction}")
                 for loss_mode in LOSS_MODES:
+                    run_seed = condition_seed(
+                        SEED, dataset_name, category, direction, loss_mode
+                    )
                     pt_path = artifact_path(dataset_name, category, direction, loss_mode)
                     pt_path.parent.mkdir(parents=True, exist_ok=True)
                     expected = {
@@ -431,6 +439,7 @@ for dataset_name in DATASETS:
                         "per_image_steps": PER_IMAGE_STEPS,
                         "image_size": IMAGE_SIZE,
                         "seed": SEED,
+                        "run_seed": run_seed,
                         "protocol_split_sha256": protocol_sha,
                         "label_balance_policy": LABEL_BALANCE_POLICY,
                         "benchmark_commit": REPO_COMMIT,
@@ -468,6 +477,7 @@ for dataset_name in DATASETS:
                         print(f"[reuse] {dataset_name}/{category}/{direction}/{loss_mode}")
                         metadata = torch.load(pt_path, map_location="cpu", weights_only=False)["metadata"]
                     else:
+                        seed_everything(run_seed)
                         print(
                             f"[generate] {dataset_name}/{category}/{direction}/{loss_mode}; "
                             f"evaluation_images={len(attacked_eval)}"
@@ -565,6 +575,8 @@ for row in artifact_rows:
         "target_label": row["target_label"],
         "loss_mode": row["loss_mode"],
         "loss_formulation": row["loss_formulation"],
+        "seed": row["seed"],
+        "run_seed": row["run_seed"],
         **{field: row[field] for field in PROMPT_PROVENANCE_FIELDS},
         "attack_train_fraction": 0.0,
         "attack_train_image_count": 0,
