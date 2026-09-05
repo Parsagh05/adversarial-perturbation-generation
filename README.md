@@ -61,16 +61,36 @@ evaluated anomaly detector.
 
 ### Text prompts used by the surrogate
 
-The original setup IDs use WinCLIP-style handcrafted textual prompt
-ensembling. For each category, they form Cartesian
-combinations of photographic templates (for example, `a photo of {}`), normal
-states (`flawless`, `normal`, `without defect`, and similar descriptions), and
-abnormal states (`damaged`, `defective`, `with defect`, and similar
-descriptions). Frozen public CLIP encodes every prompt, and prompt similarities
-are aggregated with log-mean-exp to produce the normal and abnormal logits.
+Frozen setups use **WinCLIP's published compositional prompt ensemble,
+verbatim and in order** — the same vocabulary the `backbone_eval` harness
+encodes under its `fixed` prompt mode, so the surrogate and the evaluated
+backbone read identical text:
 
-These frozen-prompt setups remain unchanged and are labelled
-`frozen_winclip` in artifact manifests.
+- 22 photographic templates (`a photo of a {}.`, `a cropped photo of the {}.`,
+  `a photo of the {} for anomaly detection.`, …)
+- 7 normal states (`{}`, `flawless {}`, `{} without defect`, …)
+- 4 abnormal states (`damaged {}`, `{} with flaw`, `{} with defect`,
+  `{} with damage`)
+
+That is 154 normal and 88 abnormal prompts per category. The **real category
+name** fills every template (`bottle`, `metal nut`), not a fixed `object`
+label, which is what separates this from the object-agnostic learnable setups.
+
+Frozen public CLIP encodes and normalizes every prompt. Matching WinCLIP and
+`backbone_eval`, the normalized embeddings are averaged separately for the
+normal and abnormal classes, and each mean is normalized again to form two
+prototype embeddings. Image and patch features are compared directly with
+those two prototypes.
+
+Because `attack_code_sha256` covers only `attacks.py`, the vocabulary is
+fingerprinted separately as `prompt_ensemble_sha256`, and the reduction method
+is recorded as `prompt_aggregation`, in every artifact and manifest row.
+Changing either therefore invalidates artifact reuse instead of silently
+altering results.
+
+These frozen-prompt setups are labelled `frozen_winclip` in artifact manifests.
+Artifacts generated with the previous compact vocabulary or log-mean-exp
+aggregation are incompatible and must be regenerated.
 
 ### Object-agnostic learnable prompts
 

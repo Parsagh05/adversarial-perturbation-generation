@@ -18,7 +18,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .prompts import ObjectAgnosticPromptEnsemble, PromptEnsemble
+from .prompts import (
+    FROZEN_PROMPT_AGGREGATION,
+    ObjectAgnosticPromptEnsemble,
+    PromptEnsemble,
+    frozen_ensemble_sha256,
+)
 
 
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -131,6 +136,8 @@ class CLIPSurrogate:
                 "prompt_abnormal_suffix": "winclip_cartesian_abnormal_states",
                 "prompt_category_specific": True,
                 "prompt_deep_text_tuning": False,
+                "prompt_aggregation": FROZEN_PROMPT_AGGREGATION,
+                "prompt_ensemble_sha256": frozen_ensemble_sha256(),
             }
         elif prompt_mode == "learnable_object_agnostic":
             if not learnable_prompt_checkpoint or not prompt_dataset:

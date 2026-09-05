@@ -6,7 +6,12 @@ import unittest
 
 import torch
 
-from adversarial_harness.prompts import ObjectAgnosticPromptEnsemble
+from adversarial_harness import prompts
+from adversarial_harness.prompts import (
+    ObjectAgnosticPromptEnsemble,
+    PromptEnsemble,
+    ensemble_class_logits,
+)
 
 
 class _MixTokens(torch.nn.Module):
@@ -25,6 +30,13 @@ class _FakeClip(torch.nn.Module):
         with torch.no_grad():
             values = torch.arange(128 * width, dtype=torch.float32).reshape(128, width)
             self.token_embedding.weight.copy_(values / values.max())
+
+    def encode_text(self, token_ids: torch.Tensor) -> torch.Tensor:
+        embedded = self.token_embedding(token_ids)
+        x = self.transformer(embedded.permute(1, 0, 2)).permute(1, 0, 2)
+        x = self.ln_final(x)
+        rows = torch.arange(x.shape[0], device=x.device)
+        return x[rows, token_ids.argmax(dim=-1)] @ self.text_projection
 
 
 def _tokenize(prompts: list[str]) -> torch.Tensor:
@@ -104,6 +116,96 @@ class ObjectAgnosticPromptTests(unittest.TestCase):
                 ObjectAgnosticPromptEnsemble(
                     _FakeClip(), _tokenize, ["bottle"], "cpu", str(path), "mvtec"
                 )
+
+
+class WinCLIPVocabularyTests(unittest.TestCase):
+    """Pin the frozen ensemble to WinCLIP's published set.
+
+    The same vocabulary is encoded by the backbone_eval harness under its
+    "fixed" prompt mode, so the surrogate and the evaluated backbone read
+    identical text. Drift here changes every perturbation silently.
+    """
+
+    TEMPLATES = (
+        "a cropped photo of the {}.", "a cropped photo of a {}.",
+        "a close-up photo of a {}.", "a close-up photo of the {}.",
+        "a bright photo of a {}.", "a bright photo of the {}.",
+        "a dark photo of the {}.", "a dark photo of a {}.",
+        "a jpeg corrupted photo of a {}.", "a jpeg corrupted photo of the {}.",
+        "a blurry photo of the {}.", "a blurry photo of a {}.",
+        "a photo of a {}.", "a photo of the {}.",
+        "a photo of a small {}.", "a photo of the small {}.",
+        "a photo of a large {}.", "a photo of the large {}.",
+        "a photo of the {} for visual inspection.",
+        "a photo of a {} for visual inspection.",
+        "a photo of the {} for anomaly detection.",
+        "a photo of a {} for anomaly detection.",
+    )
+    NORMAL = ("{}", "flawless {}", "perfect {}", "unblemished {}",
+              "{} without flaw", "{} without defect", "{} without damage")
+    ANOMALOUS = ("damaged {}", "{} with flaw", "{} with defect", "{} with damage")
+
+    def test_vocabulary_matches_winclip_verbatim_and_in_order(self) -> None:
+        self.assertEqual(tuple(prompts.PREFIX_TEMPLATES), self.TEMPLATES)
+        self.assertEqual(tuple(prompts.NORMAL_STATES), self.NORMAL)
+        self.assertEqual(tuple(prompts.ABNORMAL_STATES), self.ANOMALOUS)
+
+    def test_generated_prompts_match_the_reference_composition(self) -> None:
+        # backbone_eval: template.format(state.format(name)) for state, then template
+        for category in ("bottle", "metal_nut", "pcb1"):
+            name = category.replace("_", " ")
+            for states, mine in ((self.NORMAL, prompts.NORMAL_STATES),
+                                 (self.ANOMALOUS, prompts.ABNORMAL_STATES)):
+                expected = [t.format(s.format(name))
+                            for s in states for t in self.TEMPLATES]
+                with self.subTest(category=category, count=len(expected)):
+                    self.assertEqual(prompts.cartesian_prompts(category, mine),
+                                     expected)
+
+    def test_category_name_is_inserted_not_a_fixed_object_label(self) -> None:
+        texts = prompts.cartesian_prompts("bottle", prompts.NORMAL_STATES)
+        self.assertTrue(all("bottle" in text for text in texts))
+        self.assertFalse(any("object" in text for text in texts))
+
+    def test_frozen_bank_matches_backbone_eval_mean_prototypes(self) -> None:
+        model = _FakeClip()
+        ensemble = PromptEnsemble(model, _tokenize, ["metal_nut"], "cpu")
+        bank = ensemble["metal_nut"]
+
+        self.assertEqual(tuple(bank.normal_embeddings.shape), (1, 4))
+        self.assertEqual(tuple(bank.abnormal_embeddings.shape), (1, 4))
+        for texts, actual in (
+            (bank.normal_prompts, bank.normal_embeddings),
+            (bank.abnormal_prompts, bank.abnormal_embeddings),
+        ):
+            individual = torch.nn.functional.normalize(
+                model.encode_text(_tokenize(list(texts))).float(), dim=-1
+            )
+            expected = torch.nn.functional.normalize(
+                individual.mean(dim=0, keepdim=True), dim=-1
+            )
+            self.assertTrue(torch.allclose(actual, expected))
+
+    def test_logits_compare_visual_features_with_two_prototypes(self) -> None:
+        bank = PromptEnsemble(_FakeClip(), _tokenize, ["bottle"], "cpu")["bottle"]
+        visual = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        temperature = 0.07
+        expected = torch.nn.functional.normalize(visual, dim=-1) @ torch.cat(
+            [bank.normal_embeddings, bank.abnormal_embeddings], dim=0
+        ).t() / temperature
+        actual = ensemble_class_logits(visual, bank, temperature)
+        self.assertTrue(torch.allclose(actual, expected))
+
+    def test_ensemble_fingerprint_tracks_the_vocabulary(self) -> None:
+        baseline = prompts.frozen_ensemble_sha256()
+        self.assertEqual(len(baseline), 64)
+        original = prompts.NORMAL_STATES
+        try:
+            prompts.NORMAL_STATES = original + ("pristine {}",)
+            self.assertNotEqual(prompts.frozen_ensemble_sha256(), baseline)
+        finally:
+            prompts.NORMAL_STATES = original
+        self.assertEqual(prompts.frozen_ensemble_sha256(), baseline)
 
 
 if __name__ == "__main__":

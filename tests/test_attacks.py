@@ -107,7 +107,9 @@ class MaskAwareLocalLossTests(unittest.TestCase):
                 local_dice_weight=0.5,
             ),
         )
-        clean = torch.zeros((1, 3, 2, 2))
+        # Stay inside the fake surrogate's clamp interval so this tests the
+        # attack gradient rather than PyTorch's boundary derivative for clamp.
+        clean = torch.full((1, 3, 2, 2), 0.25)
         before = attacker.objective(clean, ["object"], 1, "local")
         adversarial, _ = attacker.perturb_batch(clean, ["object"], 1, "local")
         after = attacker.objective(adversarial, ["object"], 1, "local")
@@ -209,7 +211,9 @@ class MarginTopKLossTests(unittest.TestCase):
                         margin_topk_fraction=0.5,
                     ),
                 )
-                clean = torch.zeros((1, 3, 2, 2))
+                # Stay inside the fake surrogate's clamp interval so this tests
+                # the attack gradient, not clamp's derivative at zero.
+                clean = torch.full((1, 3, 2, 2), 0.25)
                 before = attacker.objective(clean, ["object"], 1, mode)
                 adversarial, _ = attacker.perturb_batch(
                     clean, ["object"], 1, mode

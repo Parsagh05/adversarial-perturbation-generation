@@ -1,4 +1,4 @@
-"""WinCLIP-style Cartesian prompt ensembles and contrastive class logits."""
+"""Exact WinCLIP text ensemble and object-agnostic learnable prompts."""
 
 from __future__ import annotations
 
@@ -11,43 +11,57 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
 import torch
 
 
+# WinCLIP's published compositional ensemble, verbatim and in order. This is
+# the same vocabulary the backbone_eval evaluation harness encodes under its
+# "fixed" prompt mode, so the surrogate and the evaluated backbone read the
+# same text. The article lives in the template ("a photo of a {}.") and the
+# state carries none ("flawless {}"), which is WinCLIP's own split.
 # Component 1: photographic/context prefixes.
 PREFIX_TEMPLATES = (
-    "a photo of {}.",
-    "a close-up photo of {}.",
-    "this is a photo of {}.",
-    "there is {} in the scene.",
-    "a cropped photo of {}.",
-    "a bright photo of {}.",
-    "a dark photo of {}.",
-    "a low resolution photo of {}.",
-    "a blurry photo of {}.",
-    "a black and white photo of {}.",
+    "a cropped photo of the {}.",
+    "a cropped photo of a {}.",
+    "a close-up photo of a {}.",
+    "a close-up photo of the {}.",
+    "a bright photo of a {}.",
+    "a bright photo of the {}.",
+    "a dark photo of the {}.",
+    "a dark photo of a {}.",
+    "a jpeg corrupted photo of a {}.",
+    "a jpeg corrupted photo of the {}.",
+    "a blurry photo of the {}.",
+    "a blurry photo of a {}.",
+    "a photo of a {}.",
+    "a photo of the {}.",
+    "a photo of a small {}.",
+    "a photo of the small {}.",
+    "a photo of a large {}.",
+    "a photo of the large {}.",
+    "a photo of the {} for visual inspection.",
+    "a photo of a {} for visual inspection.",
+    "a photo of the {} for anomaly detection.",
+    "a photo of a {} for anomaly detection.",
 )
 
 # Component 2: normal and abnormal object states. Component 3 is the category.
 NORMAL_STATES = (
-    "a {}",
-    "a flawless {}",
-    "a perfect {}",
-    "an unblemished {}",
-    "a normal {}",
-    "an undamaged {}",
-    "a {} without flaw",
-    "a {} without defect",
-    "a {} without damage",
+    "{}",
+    "flawless {}",
+    "perfect {}",
+    "unblemished {}",
+    "{} without flaw",
+    "{} without defect",
+    "{} without damage",
 )
 ABNORMAL_STATES = (
-    "a damaged {}",
-    "a broken {}",
-    "an abnormal {}",
-    "a defective {}",
-    "a {} with flaw",
-    "a {} with defect",
-    "a {} with damage",
+    "damaged {}",
+    "{} with flaw",
+    "{} with defect",
+    "{} with damage",
 )
 
 VALID_PROMPT_MODES = {"frozen_winclip", "learnable_object_agnostic"}
+FROZEN_PROMPT_AGGREGATION = "mean_normalized_embedding_prototype"
+LEARNABLE_PROMPT_AGGREGATION = "single_learned_prompt_per_class"
 PROMPT_PROVENANCE_FIELDS = (
     "prompt_mode",
     "prompt_checkpoint_sha256",
@@ -60,7 +74,24 @@ PROMPT_PROVENANCE_FIELDS = (
     "prompt_abnormal_suffix",
     "prompt_category_specific",
     "prompt_deep_text_tuning",
+    "prompt_aggregation",
+    "prompt_ensemble_sha256",
 )
+
+
+def frozen_ensemble_sha256() -> str:
+    """Fingerprint the frozen vocabulary.
+
+    ``attack_code_sha256`` covers only ``attacks.py``, so without this a change
+    to the templates or state words would alter every perturbation while the
+    manifests stayed identical. Including it in the artifact metadata makes the
+    vocabulary auditable and forces regeneration when it changes.
+    """
+
+    payload = "\n".join(
+        (*PREFIX_TEMPLATES, "--", *NORMAL_STATES, "--", *ABNORMAL_STATES)
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def learnable_prompt_checkpoint(dataset: str, prompt_mode: str) -> str:
@@ -105,7 +136,7 @@ class CategoryPromptBank:
 
 
 class PromptEnsemble:
-    """Cache complete per-category prompt embeddings on the attack device."""
+    """Cache WinCLIP's two normalized mean prototypes for every category."""
 
     def __init__(self, model, tokenizer, categories: Iterable[str], device: str):
         self.model = model
@@ -120,7 +151,10 @@ class PromptEnsemble:
         with torch.no_grad():
             embeddings = self.model.encode_text(tokens).float()
             embeddings = torch.nn.functional.normalize(embeddings, dim=-1)
-        return embeddings.detach()
+            prototype = torch.nn.functional.normalize(
+                embeddings.mean(dim=0, keepdim=True), dim=-1
+            )
+        return prototype.detach()
 
     def _encode(self, category: str) -> CategoryPromptBank:
         normal = cartesian_prompts(category, NORMAL_STATES)
@@ -282,6 +316,10 @@ class ObjectAgnosticPromptEnsemble:
             "prompt_abnormal_suffix": abnormal_suffix,
             "prompt_category_specific": False,
             "prompt_deep_text_tuning": False,
+            "prompt_aggregation": LEARNABLE_PROMPT_AGGREGATION,
+            "prompt_ensemble_sha256": hashlib.sha256(
+                "\n".join(prompt_text).encode("utf-8")
+            ).hexdigest(),
         }
 
     def _encode_embedded(
@@ -307,26 +345,23 @@ def ensemble_class_logits(
     bank: CategoryPromptBank,
     temperature: float,
 ) -> torch.Tensor:
-    """Return normal/abnormal logits while retaining every prompt.
+    """Return logits against the normal and abnormal text prototypes.
 
-    For each class, similarities to all Cartesian prompts are aggregated with
-    log-mean-exp. This is a smooth ensemble decision: every prompt contributes,
-    prompt-count imbalance is corrected, and cross entropy can directly target
-    the incorrect normal/abnormal class.
+    Frozen WinCLIP banks contain the normalized mean embedding of every class's
+    Cartesian prompt ensemble, matching ``backbone_eval``'s ``fixed`` mode.
+    Learnable banks already contain one normalized embedding per class, so the
+    same two-prototype calculation applies to both prompt modes.
 
     ``visual_features`` may be ``[B, D]`` (global) or ``[B, P, D]`` (patches).
     """
 
     features = torch.nn.functional.normalize(visual_features.float(), dim=-1)
-
-    def class_logit(text: torch.Tensor) -> torch.Tensor:
-        similarities = torch.matmul(features, text.t()) / temperature
-        count = torch.tensor(
-            text.shape[0], device=similarities.device, dtype=similarities.dtype
+    prototypes = torch.cat(
+        [bank.normal_embeddings, bank.abnormal_embeddings], dim=0
+    ).float()
+    prototypes = torch.nn.functional.normalize(prototypes, dim=-1)
+    if prototypes.shape[0] != 2:
+        raise ValueError(
+            "Prompt banks must contain one normal and one abnormal prototype"
         )
-        return torch.logsumexp(similarities, dim=-1) - torch.log(count)
-
-    return torch.stack(
-        [class_logit(bank.normal_embeddings), class_logit(bank.abnormal_embeddings)],
-        dim=-1,
-    )
+    return torch.matmul(features, prototypes.t()) / temperature

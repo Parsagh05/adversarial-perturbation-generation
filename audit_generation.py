@@ -10,6 +10,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from adversarial_harness.prompts import (
+    FROZEN_PROMPT_AGGREGATION,
+    LEARNABLE_PROMPT_AGGREGATION,
+    frozen_ensemble_sha256,
+)
 from setup_catalog import SETUPS, effective_setup_id
 
 
@@ -145,6 +150,22 @@ def audit_scope(
         raise RuntimeError(f"Wrong attack seed in {manifest_path}")
     if manifest.run_seed.isna().any():
         raise RuntimeError(f"Missing condition seed in {manifest_path}")
+    required_ensemble_columns = {"prompt_aggregation", "prompt_ensemble_sha256"}
+    if not required_ensemble_columns.issubset(manifest.columns):
+        raise RuntimeError(f"Missing prompt-ensemble provenance in {manifest_path}")
+    if manifest.prompt_ensemble_sha256.fillna("").str.len().ne(64).any():
+        raise RuntimeError(f"Invalid prompt-ensemble hash in {manifest_path}")
+    expected_aggregation = (
+        FROZEN_PROMPT_AGGREGATION
+        if expected_prompt_mode == "frozen_winclip"
+        else LEARNABLE_PROMPT_AGGREGATION
+    )
+    if set(manifest.prompt_aggregation.astype(str)) != {expected_aggregation}:
+        raise RuntimeError(f"Wrong prompt aggregation in {manifest_path}")
+    if expected_prompt_mode == "frozen_winclip" and set(
+        manifest.prompt_ensemble_sha256.astype(str)
+    ) != {frozen_ensemble_sha256()}:
+        raise RuntimeError(f"Wrong frozen WinCLIP ensemble in {manifest_path}")
     if expected_prompt_mode == "learnable_object_agnostic":
         required_prompt_columns = {
             "prompt_checkpoint_sha256",
