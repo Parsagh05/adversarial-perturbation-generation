@@ -5,16 +5,23 @@ MVTEC_ROOT="${MVTEC_ROOT:-/ABSOLUTE/PATH/TO/mvtec_anomaly_detection}"
 VISA_ROOT="${VISA_ROOT:-/ABSOLUTE/PATH/TO/VisA_20220922}"
 OUTPUT_BASE="${OUTPUT_BASE:-/ABSOLUTE/PATH/TO/canonical_clip_outputs}"
 
-# all, or a comma-separated subset of 16 isolated setups. Eight base IDs cover
-# loss/steps/epsilon with frozen WinCLIP prompts; append _learnable_prompt to
-# any base ID to load the object-agnostic shallow prompt checkpoint.
 # The setup matrix is the Cartesian product of these two lists with the two
-# loss formulations and the two prompt families. Widen a sweep by editing one
-# list: SETUP_STEPS="500,800,1200" adds a third step count everywhere at once.
-# Setup IDs are derived from these values, so new entries name themselves.
+# loss formulations and the two prompt families. Setup IDs are derived from
+# these values, so new entries name themselves.
+#
+# Each SETUP_STEPS entry is one dataset:category:image triple, because the
+# scopes solve different problems: a per-dataset delta must satisfy hundreds
+# of images at once, a per-category delta about a dozen, a per-image delta
+# exactly one. cross_dataset takes no value: it delivers the per-dataset
+# delta. A bare number means all three scopes use it.
+#   SETUP_STEPS="800:200:100"            one scope-specific setting
+#   SETUP_STEPS="800:200:100,500:150:50" sweep two of them
+#   SETUP_STEPS="500,800"                two uniform settings
 SETUP_STEPS="${SETUP_STEPS:-500,800}"
 SETUP_EPSILONS="${SETUP_EPSILONS:-2/255,4/255}"
 
+# all, or a comma-separated subset of the generated setup IDs. Append
+# _learnable_prompt to any frozen ID to select its learned-prompt counterpart.
 RUN_SETUPS="${RUN_SETUPS:-all}"
 
 # frozen: run only WinCLIP prompt setups
@@ -58,9 +65,8 @@ GPU="${GPU:-0}"
 IMAGE_SIZE="${IMAGE_SIZE:-518}"
 ATTACK_SEED="${ATTACK_SEED:-111}"
 
-# Every selected setup applies the same step count and epsilon to the
-# per-dataset, per-category, and per-image scopes. The launcher supplies these
-# values from RUN_SETUPS and keeps every setup in an independent folder.
+# Initial PGD step size, shared by every scope and decayed by
+# STEP_SIZE_SCHEDULE. Step counts are per scope; see SETUP_STEPS above.
 INITIAL_STEP_SIZE="${INITIAL_STEP_SIZE:-0.25/255}"
 
 # Fast plumbing check. Smoke outputs are not benchmark results.

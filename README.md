@@ -251,7 +251,7 @@ entries:
 
 | List | Default | Override |
 |---|---|---|
-| step counts | `500, 800` | `SETUP_STEPS="500,800,1200"` |
+| step counts | `500, 800` | `SETUP_STEPS="800:200:100"` |
 | Linf budgets | `2/255, 4/255` | `SETUP_EPSILONS="2/255,4/255,8/255"` |
 | loss formulations | `ce_focal_dice, margin_topk` | fixed |
 | prompt families | `frozen_winclip, learnable_object_agnostic` | fixed |
@@ -260,6 +260,26 @@ The defaults reproduce the original 16 setups exactly. `SETUP_STEPS="1200"`
 gives 8 setups all named `steps1200_*`; `SETUP_STEPS="500,800,1200"` gives 24.
 Because IDs are derived, generated entries name themselves and nothing else
 needs editing.
+
+### Steps are per scope
+
+A `SETUP_STEPS` entry is a `dataset:category:image` triple. The scopes fit a
+very different number of images per delta, so a single count either
+undertrains the per-dataset scope or massively over-optimizes the others:
+at 500 steps a per-dataset delta makes 4.5 passes over its 224 training
+images, a per-category delta 286 passes over its ~14, and a per-image delta
+500 passes over the single image it attacks.
+
+`SETUP_STEPS="800:200:100"` therefore names itself
+`steps800_cat200_img100_eps2`, and each scope receives its own count.
+cross-dataset takes no value of its own because it delivers the per-dataset
+delta. A bare number keeps the compact `steps800_eps2` name and gives every
+scope the same count, so existing output names are unchanged.
+
+Note that per-image fits the very image it attacks, so "overfitting" does
+not apply there; its step count is purely a convergence choice. Checkpoint
+selection uses the attack-training loss, so it cannot detect overfitting in
+the universal scopes either -- the step count is the only regulariser.
 
 ### Setup IDs are derived, not stored
 

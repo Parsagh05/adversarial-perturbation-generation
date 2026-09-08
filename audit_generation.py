@@ -102,7 +102,7 @@ def audit_scope(
     setup_root: Path,
     scope: str,
     bundle_name: str,
-    expected_steps: int,
+    expected_steps: dict[str, int],
     expected_epsilon: float,
     expected_loss_formulation: str,
     expected_prompt_mode: str,
@@ -123,8 +123,11 @@ def audit_scope(
     diagnostics = pd.read_csv(diagnostics_path)
     if manifest.empty or diagnostics.empty or set(manifest.scope) != {scope}:
         raise RuntimeError(f"Invalid {scope} tables in {setup_root.name}")
-    if set(manifest.optimization_steps.astype(int)) != {expected_steps}:
-        raise RuntimeError(f"Wrong steps in {manifest_path}")
+    if set(manifest.optimization_steps.astype(int)) != {expected_steps[scope]}:
+        raise RuntimeError(
+            f"Wrong steps in {manifest_path}: scope {scope} expects "
+            f"{expected_steps[scope]}"
+        )
     if not manifest.epsilon.astype(float).map(
         lambda value: abs(value - expected_epsilon) <= 1e-12
     ).all():
@@ -237,10 +240,16 @@ def main() -> None:
     protocol_hashes: set[str] = set()
     for setup_id in selected_setups():
         setup = SETUPS[setup_id]
-        expected_steps = SMOKE_STEPS if SMOKE else setup.steps
+        # cross_dataset delivers the per-dataset delta, so it shares its count.
+        expected_steps = {
+            "dataset": SMOKE_STEPS if SMOKE else setup.steps,
+            "cross_dataset": SMOKE_STEPS if SMOKE else setup.steps,
+            "per_category": SMOKE_STEPS if SMOKE else setup.category_steps,
+            "per_image": SMOKE_STEPS if SMOKE else setup.image_steps,
+        }
         # Same derivation as train.sh, so the audit looks where the run wrote.
         effective_id = effective_setup_id(
-            setup, expected_steps, ATTACK_TRAIN_FRACTION
+            setup, SMOKE_STEPS if SMOKE else None, ATTACK_TRAIN_FRACTION
         )
         prompt_folder = (
             "frozen_prompt"

@@ -90,8 +90,11 @@ override = int(os.environ["SMOKE_STEPS"]) if smoke else None
 fraction = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 produced = {}
 for setup_id, setup in SETUPS.items():
+    # A smoke override collapses every scope onto one count.
     steps = setup.steps if override is None else override
-    effective = effective_setup_id(setup, steps, fraction)
+    category_steps = setup.category_steps if override is None else override
+    image_steps = setup.image_steps if override is None else override
+    effective = effective_setup_id(setup, override, fraction)
     if effective in produced:
         # A single step override collapses every step count onto one name, so
         # distinct catalog rows would otherwise overwrite each other's output.
@@ -103,8 +106,9 @@ for setup_id, setup in SETUPS.items():
         continue
     produced[effective] = setup_id
     print("\t".join((
-        setup_id, str(steps), setup.epsilon_label,
-        setup.loss_formulation, setup.prompt_mode, effective,
+        setup_id, str(steps), str(category_steps), str(image_steps),
+        setup.epsilon_label, setup.loss_formulation, setup.prompt_mode,
+        effective,
     )))
 PYEOF
 )"
@@ -153,7 +157,7 @@ selected() {
 }
 
 selected_count=0
-while IFS=$'\t' read -r id _ _ _ prompt_mode; do
+while IFS=$'\t' read -r id _ _ _ _ _ prompt_mode _; do
   if selected "$id" "$prompt_mode"; then
     selected_count=$((selected_count + 1))
   fi
@@ -164,7 +168,7 @@ done <<< "$SETUP_TABLE"
 }
 
 learnable_selected=false
-while IFS=$'\t' read -r id _ _ _ prompt_mode; do
+while IFS=$'\t' read -r id _ _ _ _ _ prompt_mode _; do
   if selected "$id" "$prompt_mode" && [[ "$prompt_mode" == "learnable_object_agnostic" ]]; then
     learnable_selected=true
   fi
@@ -184,7 +188,7 @@ if [[ "$learnable_selected" == "true" ]]; then
   esac
 fi
 
-while IFS=$'\t' read -r id steps epsilon loss_formulation prompt_mode effective_id; do
+while IFS=$'\t' read -r id steps category_steps image_steps epsilon loss_formulation prompt_mode effective_id; do
   selected "$id" "$prompt_mode" || continue
   if [[ "$prompt_mode" == "frozen_winclip" ]]; then
     prompt_folder="frozen_prompt"
@@ -194,7 +198,7 @@ while IFS=$'\t' read -r id steps epsilon loss_formulation prompt_mode effective_
   # $steps already carries the smoke override, and $effective_id is derived
   # from it, so the directory name can never describe different parameters.
   setup_root="$PIPELINE_OUTPUT/setups/$prompt_folder/$effective_id"
-  echo "===== SETUP $effective_id (requested $id): prompt=$prompt_mode loss=$loss_formulation steps=$steps epsilon=$epsilon fraction=$ATTACK_TRAIN_FRACTION ====="
+  echo "===== SETUP $effective_id (requested $id): prompt=$prompt_mode loss=$loss_formulation steps=dataset:$steps/category:$category_steps/image:$image_steps epsilon=$epsilon fraction=$ATTACK_TRAIN_FRACTION ====="
   (
     export OUTPUT_BASE="$setup_root"
     export SETUP_ID="$effective_id"
@@ -204,9 +208,12 @@ while IFS=$'\t' read -r id steps epsilon loss_formulation prompt_mode effective_
     export EPSILON="$epsilon"
     export LOSS_FORMULATION="$loss_formulation"
     export PROMPT_MODE="$prompt_mode"
+    # Each scope fits a different number of images per delta, so each carries
+    # its own step count. cross_dataset delivers the per-dataset delta and so
+    # has no count of its own.
     export PER_DATASET_STEPS="$steps"
-    export PER_CATEGORY_STEPS="$steps"
-    export PER_IMAGE_STEPS="$steps"
+    export PER_CATEGORY_STEPS="$category_steps"
+    export PER_IMAGE_STEPS="$image_steps"
     export PER_DATASET_STEP_SIZE="$INITIAL_STEP_SIZE"
     export PER_CATEGORY_STEP_SIZE="$INITIAL_STEP_SIZE"
     export PER_IMAGE_STEP_SIZE="$INITIAL_STEP_SIZE"
