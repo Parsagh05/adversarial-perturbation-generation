@@ -134,6 +134,46 @@ The four original setup IDs keep the segmentation-aware loss above. Four new
 `MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL` defaults to 0.40. The global, local,
 and combined attack modes remain separate within every setup.
 
+## Split protocol: balanced or full
+
+`SPLIT_PROTOCOL` selects how the test images are divided. Both split each
+category independently and hold out `EVALUATION_FRACTION` of it.
+
+**`balanced`** (default, historical). Per category it computes
+`n_c = min(N_normal, N_abnormal)`, keeps `n_c` of each label and discards the
+surplus, then splits each label by the fraction. Equal normal/abnormal counts,
+at the cost of throwing images away: on MVTec this keeps 894 of 1725.
+
+**`full`** keeps every image. Each label is still split by the same fraction,
+so the split stays stratified and both labels appear on both sides, but the
+category's natural class ratio is preserved. `bottle` stays 20 normal / 63
+abnormal instead of being cut to 20 / 20. On MVTec this keeps all 1725.
+
+```bash
+export SPLIT_PROTOCOL=full            # keep every image
+export EVALUATION_FRACTION=0.50       # share of each category/label held out
+export SPLIT_PROTOCOL=balanced        # back to the historical protocol
+```
+
+Two scopes behave differently under `full`:
+
+- **cross-dataset** trains on the *complete* source dataset and is delivered to
+  the complete other dataset, instead of reusing the per-dataset delta that saw
+  only the attack-train half. It is delivered to a different dataset entirely,
+  so nothing leaks.
+- **per-image** covers every test image rather than only the held-out half,
+  because it fits the very image it attacks and the split does not constrain it.
+
+Per-dataset and per-category are unchanged in shape: train on the attack-train
+part of each category, deliver to the held-out part.
+
+The protocol is recorded so an evaluator can detect it:
+
+- the setup ID, e.g. `steps800_eps2_full` (`balanced` adds no component)
+- `label_balance_policy` on every protocol CSV row
+- `split_protocol` on every manifest and diagnostics row, plus `training_source`
+  on per-dataset rows (`attack_train_partition` or `complete_source_dataset`)
+
 ## Balanced protocol
 
 For both MVTec and VisA, each category is deterministically downsampled to the

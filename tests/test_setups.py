@@ -14,6 +14,7 @@ from setup_catalog import (
     compose_setup_id,
     effective_setup_id,
     epsilon_grid,
+    split_protocol_setting,
     step_grid,
 )
 
@@ -274,3 +275,48 @@ class ShellLauncherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SplitProtocolTests(unittest.TestCase):
+    """balanced downsamples each category to min(); full keeps every image."""
+
+    def test_balanced_is_the_default_and_adds_no_name_component(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SPLIT_PROTOCOL", None)
+            self.assertEqual(split_protocol_setting(), "balanced")
+        setup = SETUPS["steps500_eps4_margin_topk"]
+        self.assertEqual(effective_setup_id(setup), "steps500_eps4_margin_topk")
+
+    def test_full_is_named_so_the_protocols_cannot_collide(self) -> None:
+        setup = SETUPS["steps500_eps4_margin_topk"]
+        self.assertEqual(
+            effective_setup_id(setup, None, 1.0, "full"),
+            "steps500_eps4_margin_topk_full",
+        )
+        self.assertEqual(
+            effective_setup_id(setup, None, 0.2, "full"),
+            "steps500_eps4_margin_topk_full_train20",
+        )
+
+    def test_learnable_suffix_stays_last(self) -> None:
+        setup = SETUPS["steps500_eps2_margin_topk_learnable_prompt"]
+        derived = effective_setup_id(setup, None, 1.0, "full")
+        self.assertTrue(derived.endswith("_learnable_prompt"))
+        self.assertIn("_full_", derived)
+
+    def test_unknown_protocol_is_rejected(self) -> None:
+        with mock.patch.dict(os.environ, {"SPLIT_PROTOCOL": "kfold"}):
+            with self.assertRaises(ValueError):
+                split_protocol_setting()
+
+    def test_launcher_names_carry_the_protocol(self) -> None:
+        rows = _launcher_table(SPLIT_PROTOCOL="full")
+        self.assertTrue(all(row[7].count("_full") == 1 for row in rows))
+        balanced = _launcher_table(SPLIT_PROTOCOL="balanced")
+        self.assertTrue(all("_full" not in row[7] for row in balanced))
+
+    def test_config_exposes_the_switch(self) -> None:
+        config = (Path(__file__).resolve().parents[1] / "config.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('SPLIT_PROTOCOL="${SPLIT_PROTOCOL:-balanced}"', config)

@@ -49,6 +49,34 @@ def _fraction_tag(attack_train_fraction: float) -> str:
     return "train" + percent.replace(".", "p")
 
 
+SPLIT_PROTOCOLS = ("balanced", "full")
+
+
+def _protocol_tag(split_protocol: str) -> str:
+    """``""`` for the historical balanced protocol, ``full`` for the new one.
+
+    balanced adds no component so existing output names are unchanged, the same
+    way a full train fraction does not.
+    """
+
+    if split_protocol not in SPLIT_PROTOCOLS:
+        raise ValueError(
+            f"split_protocol must be one of {SPLIT_PROTOCOLS}, got {split_protocol!r}"
+        )
+    return "" if split_protocol == "balanced" else "full"
+
+
+def split_protocol_setting() -> str:
+    """``balanced`` (downsample each category to min) or ``full`` (keep all)."""
+
+    protocol = os.environ.get("SPLIT_PROTOCOL", "balanced").strip().lower()
+    if protocol not in SPLIT_PROTOCOLS:
+        raise ValueError(
+            f"SPLIT_PROTOCOL must be one of {SPLIT_PROTOCOLS}, got {protocol!r}"
+        )
+    return protocol
+
+
 def _steps_tag(steps: int, category_steps: int, image_steps: int) -> str:
     """``steps800`` when the scopes agree, ``steps800_cat200_img100`` when not.
 
@@ -70,6 +98,7 @@ def compose_setup_id(
     loss_formulation: str,
     prompt_mode: str,
     attack_train_fraction: float = 1.0,
+    split_protocol: str = "balanced",
 ) -> str:
     """Build the canonical ID for one effective configuration.
 
@@ -84,6 +113,9 @@ def compose_setup_id(
     ]
     if loss_formulation == "margin_topk":
         parts.append("margin_topk")
+    protocol = _protocol_tag(split_protocol)
+    if protocol:
+        parts.append(protocol)
     fraction = _fraction_tag(attack_train_fraction)
     if fraction:
         parts.append(fraction)
@@ -93,7 +125,10 @@ def compose_setup_id(
 
 
 def effective_setup_id(
-    setup: Setup, steps: int | None = None, attack_train_fraction: float = 1.0
+    setup: Setup,
+    steps: int | None = None,
+    attack_train_fraction: float = 1.0,
+    split_protocol: str = "balanced",
 ) -> str:
     """Canonical ID for a catalog entry after any step/fraction override.
 
@@ -108,6 +143,7 @@ def effective_setup_id(
         setup.loss_formulation,
         setup.prompt_mode,
         attack_train_fraction,
+        split_protocol,
     )
 
 

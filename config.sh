@@ -32,8 +32,17 @@ PROMPT_SETUP="${PROMPT_SETUP:-both}"
 # Pin the external feature-loader implementation used by every run.
 ANOMALYCLIP_COMMIT="${ANOMALYCLIP_COMMIT:-3911738c0867544f545a076ad78f3f11d9ecbfdf}"
 
-# Within each dataset/category, downsample to equal label counts, then split
-# each label 50% attack_train and 50% evaluation/test.
+# balanced: per category keep min(normal, abnormal) of each label, discarding
+#   the surplus, then split. Equal label counts; the historical protocol.
+# full: keep every image and split each label by EVALUATION_FRACTION, so the
+#   category's natural class ratio survives and nothing is discarded.
+#   Cross-dataset additionally trains on the complete source dataset and is
+#   delivered to the complete other dataset, and per-image covers every test
+#   image rather than only the held-out half.
+SPLIT_PROTOCOL="${SPLIT_PROTOCOL:-balanced}"
+
+# Fraction of each category/label stratum held out for evaluation. Applies to
+# both protocols: 0.50 is the historical half, 0.30 keeps more for training.
 SPLIT_SEED="${SPLIT_SEED:-111}"
 EVALUATION_FRACTION="${EVALUATION_FRACTION:-0.50}"
 

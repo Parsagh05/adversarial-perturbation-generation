@@ -58,6 +58,7 @@ from adversarial_harness.prompts import (
 )
 from common import (
     LABEL_BALANCE_POLICY,
+    split_protocol,
     assert_partition_disjoint,
     bind_discovered_samples_from_partition_csvs,
     fraction_tag,
@@ -203,6 +204,29 @@ samples, assignments, rank_info, protocol_frame = bind_discovered_samples_from_p
 assert_partition_disjoint(assignments)
 
 # Hard leakage guards.
+SPLIT_PROTOCOL = split_protocol()
+# Under "full", cross-dataset trains on the complete source dataset: it is
+# delivered to a different dataset entirely, so nothing leaks. The historical
+# "balanced" protocol keeps reusing the attack_train half for both settings.
+CROSS_DATASET_FULL_SOURCE = SPLIT_PROTOCOL == "full"
+
+
+def dataset_partitions():
+    """Yield ``(key, use_full_source, settings)`` for every delta to optimize.
+
+    balanced keeps one delta serving both transfer settings. full optimizes the
+    same-dataset delta on the attack_train half as usual, plus a separate delta
+    on the complete source dataset for cross-dataset delivery.
+    """
+
+    if not CROSS_DATASET_FULL_SOURCE:
+        yield "", False, tuple(TRANSFER_SETTINGS)
+        return
+    if "same_dataset" in TRANSFER_SETTINGS:
+        yield "", False, ("same_dataset",)
+    if "cross_dataset" in TRANSFER_SETTINGS:
+        yield "fullsource", True, ("cross_dataset",)
+
 attack_train_ids = {pid for pid, part in assignments.items() if part == "attack_train"}
 evaluation_ids = {pid for pid, part in assignments.items() if part == "evaluation"}
 if attack_train_ids & evaluation_ids:
@@ -217,7 +241,28 @@ def mask_loader(sample: MVTecSample) -> torch.Tensor:
     return torch.from_numpy(load_mask(sample, IMAGE_SIZE)).float()
 
 
-def artifact_path(source_dataset: str, fraction: float, direction: str, loss_mode: str):
+def source_training_samples(source_dataset: str, source_label: int, pool, full: bool):
+    """Images this delta may train on.
+
+    ``full`` uses every image of the source dataset for the cross-dataset
+    delta; otherwise the nested attack_train subset is used, as before.
+    """
+
+    if not full:
+        return sorted(
+            [s for s in pool if s.dataset == source_dataset and s.label == source_label],
+            key=lambda s: s.protocol_id,
+        )
+    return sorted(
+        [s for s in samples if s.dataset == source_dataset and s.label == source_label],
+        key=lambda s: s.protocol_id,
+    )
+
+
+def artifact_path(
+    source_dataset: str, fraction: float, direction: str, loss_mode: str,
+    partition_key: str = "",
+):
     root = (
         OUTPUT_ROOT
         / "noises"
@@ -225,6 +270,8 @@ def artifact_path(source_dataset: str, fraction: float, direction: str, loss_mod
         / fraction_tag(fraction)
         / "perturbations"
     )
+    if partition_key:
+        root = root / partition_key
     return root / f"dataset__{direction}__{loss_mode}.pt"
 
 
@@ -291,7 +338,10 @@ for source_dataset in SOURCE_DATASETS:
         prompt_dataset=source_dataset,
     )
     try:
-        for fraction in TRAIN_FRACTIONS:
+        for partition_key, use_full_source, partition_settings in dataset_partitions():
+          if partition_key:
+              print(f"--- {partition_key}: training on the complete source dataset ---")
+          for fraction in TRAIN_FRACTIONS:
             fraction_pool = select_attack_train_fraction(samples, assignments, rank_info, fraction)
             if any(assignments[s.protocol_id] != "attack_train" for s in fraction_pool):
                 raise RuntimeError("Evaluation image entered per-dataset optimization")
@@ -300,9 +350,8 @@ for source_dataset in SOURCE_DATASETS:
                 condition_config = replace(
                     attack_config, margin_topk_fraction=MARGIN_TOPK_FRACTIONS[direction]
                 )
-                source_train = sorted(
-                    [s for s in fraction_pool if s.dataset == source_dataset and s.label == source_label],
-                    key=lambda s: s.protocol_id,
+                source_train = source_training_samples(
+                    source_dataset, source_label, fraction_pool, use_full_source
                 )
                 if not source_train:
                     raise RuntimeError(
@@ -311,7 +360,9 @@ for source_dataset in SOURCE_DATASETS:
                 if any(sample.dataset != source_dataset for sample in source_train):
                     raise RuntimeError("A non-source dataset entered attack optimization")
                 for loss_mode in LOSS_MODES:
-                    pt_path = artifact_path(source_dataset, fraction, direction, loss_mode)
+                    pt_path = artifact_path(
+                        source_dataset, fraction, direction, loss_mode, partition_key
+                    )
                     pt_path.parent.mkdir(parents=True, exist_ok=True)
                     expected = {
                         "format_version": "canonical_clip_per_dataset_segmentation_loss_v2",
@@ -328,7 +379,12 @@ for source_dataset in SOURCE_DATASETS:
                         "image_size": IMAGE_SIZE,
                         "seed": SEED,
                         "protocol_split_sha256": protocol_sha,
-                        "label_balance_policy": LABEL_BALANCE_POLICY,
+                        "label_balance_policy": protocol_frame.label_balance_policy.iloc[0],
+                        "split_protocol": SPLIT_PROTOCOL,
+                        "training_source": (
+                            "complete_source_dataset" if use_full_source
+                            else "attack_train_partition"
+                        ),
                         "benchmark_commit": REPO_COMMIT,
                         "anomalyclip_loader_commit": ANOMALYCLIP_COMMIT,
                         "generator_script_sha256": GENERATOR_SCRIPT_SHA256,
@@ -457,6 +513,7 @@ for source_dataset in SOURCE_DATASETS:
                     row = dict(metadata)
                     row["artifact_path"] = str(pt_path)
                     row["artifact_file_sha256"] = sha256_file(pt_path)
+                    row["transfer_settings"] = tuple(partition_settings)
                     artifact_rows.append(row)
     finally:
         surrogate.release()
@@ -487,19 +544,27 @@ for row in artifact_rows:
             if row["source_dataset"] == target_dataset
             else "cross_dataset"
         )
-        if setting not in delivery_rows:
+        if setting not in delivery_rows or setting not in row["transfer_settings"]:
             continue
+        # Under "full", a cross-dataset delta trained on the complete source is
+        # delivered to the complete target dataset: it never trained on any of
+        # those images, so the train/evaluation split does not constrain it.
+        deliver_whole_target = (
+            CROSS_DATASET_FULL_SOURCE and setting == "cross_dataset"
+        )
         attacked_eval_ids = sorted(
             s.protocol_id for s in samples
             if s.dataset == target_dataset
             and s.label == row["source_label"]
-            and assignments[s.protocol_id] == "evaluation"
+            and (deliver_whole_target or assignments[s.protocol_id] == "evaluation")
         )
         delivery_rows[setting].append({
             "scope": BUNDLE_SCOPES[setting],
             "source_dataset": row["source_dataset"],
             "target_dataset": target_dataset,
             "transfer_setting": setting,
+            "split_protocol": row["split_protocol"],
+            "training_source": row["training_source"],
             "direction": row["direction"],
             "source_label": row["source_label"],
             "target_label": row["target_label"],
@@ -557,6 +622,8 @@ diagnostics_frame = pd.DataFrame([
         "direction": row["direction"],
         "loss_mode": row["loss_mode"],
         "loss_formulation": row["loss_formulation"],
+        "split_protocol": row["split_protocol"],
+        "training_source": row["training_source"],
         "prompt_mode": row["prompt_mode"],
         "initial_total_loss": row["initial_losses"]["total"],
         "final_total_loss": row["final_losses"]["total"],

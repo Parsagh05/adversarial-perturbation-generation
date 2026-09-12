@@ -25,7 +25,13 @@ OUTPUT_BASE = Path(os.environ["OUTPUT_BASE"]).expanduser().resolve()
 PROTOCOL_DIR = OUTPUT_BASE / "protocol"
 ATTACK_TRAIN_CSV = PROTOCOL_DIR / "attack_train_indices.csv"
 EVALUATION_CSV = PROTOCOL_DIR / "evaluation_test_indices.csv"
+# balanced: downsample each category to min(normal, abnormal) so both labels
+#   have equal counts, discarding the surplus. The historical protocol.
+# full: keep every image and split each label by the same fraction, so the
+#   category's natural class ratio survives into both partitions.
 LABEL_BALANCE_POLICY = "per_dataset_category_equal_labels_v1"
+FULL_LABEL_POLICY = "per_dataset_category_all_images_v1"
+SPLIT_PROTOCOLS = ("balanced", "full")
 
 REQUIRED_COLUMNS = {
     "protocol_id", "dataset", "category", "defect_type", "label", "partition",
@@ -80,6 +86,21 @@ def generation_datasets() -> tuple[str, ...]:
     """Backward-compatible alias used by same-dataset attack scopes."""
 
     return source_datasets()
+
+
+def split_protocol() -> str:
+    """``balanced`` (historical) or ``full`` (keep every image)."""
+
+    protocol = os.environ.get("SPLIT_PROTOCOL", "balanced").strip().lower()
+    if protocol not in SPLIT_PROTOCOLS:
+        raise ValueError(
+            f"SPLIT_PROTOCOL must be one of {SPLIT_PROTOCOLS}, got {protocol!r}"
+        )
+    return protocol
+
+
+def label_policy_for(protocol: str) -> str:
+    return LABEL_BALANCE_POLICY if protocol == "balanced" else FULL_LABEL_POLICY
 
 
 def parse_numeric(raw: str) -> float:
@@ -184,10 +205,12 @@ def _validate_partition_frame(path: Path, expected_partition: str) -> pd.DataFra
 
 
 def _assert_protocol_label_balance(frame: pd.DataFrame) -> None:
+    """Both labels must always be present; equal counts only under ``balanced``."""
+
     policies = set(frame["label_balance_policy"].astype(str))
-    if policies != {LABEL_BALANCE_POLICY}:
+    if policies not in ({LABEL_BALANCE_POLICY}, {FULL_LABEL_POLICY}):
         raise RuntimeError(
-            "Protocol CSVs use an unsupported label-balancing policy: "
+            "Protocol CSVs use an unsupported or mixed label policy: "
             f"{sorted(policies)}"
         )
     counts = frame.groupby(
@@ -195,6 +218,12 @@ def _assert_protocol_label_balance(frame: pd.DataFrame) -> None:
     ).size().unstack(fill_value=0)
     if set(counts.columns) != {0, 1}:
         raise RuntimeError("Every protocol stratum must contain labels 0 and 1")
+    if (counts[[0, 1]] == 0).any().any():
+        raise RuntimeError("Every protocol stratum must contain both labels")
+    if policies == {FULL_LABEL_POLICY}:
+        # Keeping every image means the counts are deliberately unequal; the
+        # split is stratified instead, so each label appears on both sides.
+        return
     unequal = counts[counts[0] != counts[1]]
     if not unequal.empty:
         raise RuntimeError(
@@ -203,8 +232,15 @@ def _assert_protocol_label_balance(frame: pd.DataFrame) -> None:
         )
 
 
-def _balanced_category_groups(samples: Sequence, split_seed: int):
-    """Return equally sized, deterministically shuffled label groups per category."""
+def _balanced_category_groups(
+    samples: Sequence, split_seed: int, protocol: str = "balanced"
+):
+    """Deterministically shuffled label groups per category.
+
+    ``balanced`` truncates both labels to min(normal, abnormal), discarding the
+    surplus. ``full`` keeps every image, so the category's own class ratio is
+    preserved and nothing is thrown away.
+    """
 
     raw_groups: dict[tuple[str, str, int], list] = {}
     for sample in samples:
@@ -221,17 +257,18 @@ def _balanced_category_groups(samples: Sequence, split_seed: int):
             raise RuntimeError(
                 f"Need both labels in {dataset}/{category} for a balanced protocol"
             )
-        balanced_size = min(len(normal), len(anomalous))
-        if balanced_size < 2:
+        if min(len(normal), len(anomalous)) < 2:
             raise RuntimeError(
                 f"Need at least two images per label in {dataset}/{category}"
             )
+        balanced_size = min(len(normal), len(anomalous))
         for label, group in ((0, normal), (1, anomalous)):
             shuffled = sorted(group, key=lambda sample: sample.protocol_id)
             rng = random.Random(_stable_seed(split_seed, dataset, category, label))
             rng.shuffle(shuffled)
             key = (dataset, category, label)
-            balanced[key] = shuffled[:balanced_size]
+            keep = balanced_size if protocol == "balanced" else len(shuffled)
+            balanced[key] = shuffled[:keep]
             original_sizes[key] = len(group)
     return balanced, original_sizes
 
@@ -252,6 +289,8 @@ def prepare_protocol_split() -> None:
 
     split_seed = int(os.environ.get("SPLIT_SEED", "111"))
     evaluation_fraction = float(os.environ.get("EVALUATION_FRACTION", "0.50"))
+    protocol = split_protocol()
+    policy = label_policy_for(protocol)
     datasets = protocol_datasets()
     discovery_mode = datasets[0] if len(datasets) == 1 else "both"
     if not (0.0 < evaluation_fraction < 1.0):
@@ -276,6 +315,12 @@ def prepare_protocol_split() -> None:
                 "Existing evaluation_test_indices.csv does not match "
                 "EVALUATION_DATASETS"
             )
+        stored_policy = set(pd.concat([train, evaluation]).label_balance_policy.astype(str))
+        if stored_policy != {policy}:
+            raise RuntimeError(
+                f"Existing protocol CSVs use {sorted(stored_policy)}, requested "
+                f"{policy}. Use a protocol-specific OUTPUT_BASE."
+            )
         stored_seed = set(pd.concat([train, evaluation]).split_seed.astype(int))
         stored_fraction = set(pd.concat([train, evaluation]).evaluation_fraction.astype(float))
         if stored_seed != {split_seed} or len(stored_fraction) != 1 or abs(next(iter(stored_fraction)) - evaluation_fraction) > 1e-12:
@@ -297,7 +342,7 @@ def prepare_protocol_split() -> None:
     if not samples:
         raise RuntimeError("No MVTec/VisA images were discovered")
 
-    groups, original_sizes = _balanced_category_groups(samples, split_seed)
+    groups, original_sizes = _balanced_category_groups(samples, split_seed, protocol)
 
     rows = []
     for (dataset, category, label), group in sorted(groups.items()):
@@ -327,7 +372,7 @@ def prepare_protocol_split() -> None:
                     "evaluation_stratum_size": len(evaluation_samples),
                     "split_seed": split_seed,
                     "evaluation_fraction": evaluation_fraction,
-                    "label_balance_policy": LABEL_BALANCE_POLICY,
+                    "label_balance_policy": policy,
                     "original_label_stratum_size": original_sizes[
                         (dataset, category, label)
                     ],
@@ -350,9 +395,12 @@ def prepare_protocol_split() -> None:
         partition: subset.groupby("label").size().to_dict()
         for partition, subset in (("train", train), ("evaluation", evaluation))
     }
+    kept = sum(len(group) for group in groups.values())
+    available = sum(original_sizes.values())
     print(
-        f"[created balanced split] train={len(train)} evaluation={len(evaluation)} "
-        f"labels={label_counts} overlap=0"
+        f"[created split] protocol={protocol} policy={policy} "
+        f"train={len(train)} evaluation={len(evaluation)} labels={label_counts} "
+        f"overlap=0 kept={kept}/{available} images"
     )
     print("Train CSV:", ATTACK_TRAIN_CSV)
     print("Evaluation CSV:", EVALUATION_CSV)

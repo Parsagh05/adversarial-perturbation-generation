@@ -12,6 +12,7 @@ os.environ.setdefault("MVTEC_ROOT", ".")
 os.environ.setdefault("VISA_ROOT", ".")
 os.environ.setdefault("OUTPUT_BASE", ".")
 
+import common
 from common import (
     _balanced_category_groups,
     evaluation_datasets,
@@ -163,3 +164,42 @@ class BalancedProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SplitProtocolGroupingTests(unittest.TestCase):
+    """The two protocols differ only in whether the surplus label is discarded."""
+
+    def _samples(self):
+        from types import SimpleNamespace
+        out = []
+        for category, (normal, abnormal) in (("bottle", (20, 63)), ("cable", (58, 92))):
+            for label, count in ((0, normal), (1, abnormal)):
+                for index in range(count):
+                    out.append(SimpleNamespace(
+                        dataset="mvtec", category=category, label=label,
+                        protocol_id=f"test/{category}/{label}/{index:04d}"))
+        return out
+
+    def test_balanced_truncates_each_category_to_the_smaller_label(self) -> None:
+        groups, sizes = _balanced_category_groups(
+            self._samples(), 111, "balanced"
+        )
+        self.assertEqual(len(groups[("mvtec", "bottle", 0)]), 20)
+        self.assertEqual(len(groups[("mvtec", "bottle", 1)]), 20)   # 63 -> 20
+        self.assertEqual(len(groups[("mvtec", "cable", 0)]), 58)
+        self.assertEqual(len(groups[("mvtec", "cable", 1)]), 58)    # 92 -> 58
+        self.assertEqual(sizes[("mvtec", "bottle", 1)], 63)         # original recorded
+
+    def test_full_keeps_every_image_and_its_class_ratio(self) -> None:
+        groups, _ = _balanced_category_groups(self._samples(), 111, "full")
+        self.assertEqual(len(groups[("mvtec", "bottle", 0)]), 20)
+        self.assertEqual(len(groups[("mvtec", "bottle", 1)]), 63)
+        self.assertEqual(len(groups[("mvtec", "cable", 1)]), 92)
+        self.assertEqual(sum(len(v) for v in groups.values()), 20 + 63 + 58 + 92)
+
+    def test_protocols_are_named_and_validated(self) -> None:
+        self.assertEqual(common.label_policy_for("balanced"), common.LABEL_BALANCE_POLICY)
+        self.assertEqual(common.label_policy_for("full"), common.FULL_LABEL_POLICY)
+        with mock.patch.dict(os.environ, {"SPLIT_PROTOCOL": "nope"}):
+            with self.assertRaises(ValueError):
+                common.split_protocol()

@@ -81,20 +81,21 @@ fi
 SETUP_TABLE="$(PYTHONPATH="$ROOT" "$PYTHON" - <<'PYEOF'
 import os
 import sys
-from setup_catalog import SETUPS, effective_setup_id
+from setup_catalog import SETUPS, effective_setup_id, split_protocol_setting
 
 # The effective steps and train fraction are known before any setup runs,
 # so the output name is resolved here rather than after an override.
 smoke = os.environ.get("SMOKE_TEST", "false").strip().lower() in {"1", "true", "yes", "on"}
 override = int(os.environ["SMOKE_STEPS"]) if smoke else None
 fraction = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
+protocol = split_protocol_setting()
 produced = {}
 for setup_id, setup in SETUPS.items():
     # A smoke override collapses every scope onto one count.
     steps = setup.steps if override is None else override
     category_steps = setup.category_steps if override is None else override
     image_steps = setup.image_steps if override is None else override
-    effective = effective_setup_id(setup, override, fraction)
+    effective = effective_setup_id(setup, override, fraction, protocol)
     if effective in produced:
         # A single step override collapses every step count onto one name, so
         # distinct catalog rows would otherwise overwrite each other's output.

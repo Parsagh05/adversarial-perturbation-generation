@@ -57,6 +57,7 @@ from adversarial_harness.prompts import (
 )
 from common import (
     LABEL_BALANCE_POLICY,
+    split_protocol,
     assert_partition_disjoint,
     bind_discovered_samples_from_partition_csvs,
     fraction_tag,
@@ -211,6 +212,7 @@ samples, assignments, rank_info, protocol_frame = bind_discovered_samples_from_p
     all_discovered, ATTACK_TRAIN_CSV, EVALUATION_CSV
 )
 assert_partition_disjoint(assignments)
+SPLIT_PROTOCOL = split_protocol()
 evaluation_ids = {pid for pid, part in assignments.items() if part == "evaluation"}
 
 IMAGE_CACHE = {}
@@ -542,7 +544,8 @@ for dataset_name in DATASETS:
                             "image_size": IMAGE_SIZE,
                             "seed": SEED,
                             "protocol_split_sha256": protocol_sha,
-                            "label_balance_policy": LABEL_BALANCE_POLICY,
+                            "label_balance_policy": protocol_frame.label_balance_policy.iloc[0],
+                            "split_protocol": SPLIT_PROTOCOL,
                             "benchmark_commit": REPO_COMMIT,
                             "effective_batch_size": EFFECTIVE_BATCH_SIZE,
                             "configured_micro_batch_size": MICRO_BATCH_SIZE,
@@ -694,6 +697,7 @@ for row in artifact_rows:
         "target_label": row["target_label"],
         "loss_mode": row["loss_mode"],
         "loss_formulation": row["loss_formulation"],
+        "split_protocol": row["split_protocol"],
         "seed": row["seed"],
         "run_seed": row["run_seed"],
         **{field: row[field] for field in PROMPT_PROVENANCE_FIELDS},
@@ -745,6 +749,7 @@ pd.DataFrame([
         "direction": row["direction"],
         "loss_mode": row["loss_mode"],
         "loss_formulation": row["loss_formulation"],
+        "split_protocol": row["split_protocol"],
         "prompt_mode": row["prompt_mode"],
         "initial_total_loss": row["initial_losses"]["total"],
         "final_total_loss": row["final_losses"]["total"],

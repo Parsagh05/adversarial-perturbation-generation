@@ -56,6 +56,7 @@ from adversarial_harness.prompts import (
 )
 from common import (
     LABEL_BALANCE_POLICY,
+    split_protocol,
     assert_partition_disjoint,
     bind_discovered_samples_from_partition_csvs,
     generation_datasets,
@@ -208,13 +209,19 @@ samples, assignments, rank_info, protocol_frame = bind_discovered_samples_from_p
 assert_partition_disjoint(assignments)
 attack_train_ids = {pid for pid, part in assignments.items() if part == "attack_train"}
 
+SPLIT_PROTOCOL = split_protocol()
+# Per-image fits the very image it attacks, so the train/evaluation split does
+# not constrain it. Under "full" it therefore covers every test image; the
+# historical protocol keeps it on the evaluation partition only.
+ATTACK_EVERY_IMAGE = SPLIT_PROTOCOL == "full"
+
 # Deterministic nested evaluation subset per dataset/category/label. Full=1.0 by default.
 evaluation_samples = []
 for sample in samples:
     if sample.dataset not in DATASETS:
         continue
     pid = sample.protocol_id
-    if assignments[pid] != "evaluation":
+    if not ATTACK_EVERY_IMAGE and assignments[pid] != "evaluation":
         continue
     info = rank_info[pid]
     rank = int(info["evaluation_rank"])
@@ -222,8 +229,11 @@ for sample in samples:
     keep = max(1, int(math.ceil(size * EVALUATION_FRACTION)))
     if rank <= keep:
         evaluation_samples.append(sample)
-if any(s.protocol_id in attack_train_ids for s in evaluation_samples):
+if not ATTACK_EVERY_IMAGE and any(
+    s.protocol_id in attack_train_ids for s in evaluation_samples
+):
     raise RuntimeError("Attack-train image entered per-image generation")
+print(f"Split protocol: {SPLIT_PROTOCOL}; per-image targets: {len(evaluation_samples)}")
 
 IMAGE_CACHE = {}
 MASK_CACHE = {}
@@ -441,7 +451,8 @@ for dataset_name in DATASETS:
                         "seed": SEED,
                         "run_seed": run_seed,
                         "protocol_split_sha256": protocol_sha,
-                        "label_balance_policy": LABEL_BALANCE_POLICY,
+                        "label_balance_policy": protocol_frame.label_balance_policy.iloc[0],
+                        "split_protocol": SPLIT_PROTOCOL,
                         "benchmark_commit": REPO_COMMIT,
                         "effective_batch_size": EFFECTIVE_BATCH_SIZE,
                         "configured_micro_batch_size": MICRO_BATCH_SIZE,
@@ -575,6 +586,7 @@ for row in artifact_rows:
         "target_label": row["target_label"],
         "loss_mode": row["loss_mode"],
         "loss_formulation": row["loss_formulation"],
+        "split_protocol": row["split_protocol"],
         "seed": row["seed"],
         "run_seed": row["run_seed"],
         **{field: row[field] for field in PROMPT_PROVENANCE_FIELDS},
@@ -626,6 +638,7 @@ pd.DataFrame([
         "direction": row["direction"],
         "loss_mode": row["loss_mode"],
         "loss_formulation": row["loss_formulation"],
+        "split_protocol": row["split_protocol"],
         "prompt_mode": row["prompt_mode"],
         "initial_total_loss": row["initial_losses"]["total"],
         "final_total_loss": row["final_losses"]["total"],

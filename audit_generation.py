@@ -15,7 +15,7 @@ from adversarial_harness.prompts import (
     LEARNABLE_PROMPT_AGGREGATION,
     frozen_ensemble_sha256,
 )
-from setup_catalog import SETUPS, effective_setup_id
+from setup_catalog import SETUPS, effective_setup_id, split_protocol_setting
 
 
 ROOT = Path(os.environ["OUTPUT_BASE"]).expanduser().resolve()
@@ -27,6 +27,7 @@ SMOKE = os.environ.get("SMOKE_TEST", "false").lower() in {
 SMOKE_STEPS = int(os.environ.get("SMOKE_STEPS", "2"))
 EXPECTED_ATTACK_SEED = int(os.environ.get("ATTACK_SEED", "111"))
 ATTACK_TRAIN_FRACTION = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
+SPLIT_PROTOCOL = split_protocol_setting()
 
 SCOPES = {
     "dataset": (
@@ -94,7 +95,9 @@ def audit_protocol(setup_root: Path) -> None:
     counts = frame.groupby(
         ["dataset", "category", "partition", "label"]
     ).size().unstack(fill_value=0)
-    if set(counts.columns) != {0, 1} or not counts[0].eq(counts[1]).all():
+    if set(counts.columns) != {0, 1} or (counts[[0, 1]] == 0).any().any():
+        raise RuntimeError(f"A protocol stratum is missing a label in {setup_root.name}")
+    if SPLIT_PROTOCOL == "balanced" and not counts[0].eq(counts[1]).all():
         raise RuntimeError(f"Unbalanced protocol in {setup_root.name}")
 
 
@@ -187,6 +190,13 @@ def audit_scope(
         ).all():
             raise RuntimeError(f"Prompt/source dataset mismatch in {manifest_path}")
 
+    if "split_protocol" not in manifest.columns:
+        raise RuntimeError(f"Missing split-protocol provenance in {manifest_path}")
+    if set(manifest.split_protocol.astype(str)) != {SPLIT_PROTOCOL}:
+        raise RuntimeError(
+            f"Wrong split protocol in {manifest_path}: expected {SPLIT_PROTOCOL}"
+        )
+
     numeric_columns = (
         "initial_total_loss",
         "final_total_loss",
@@ -249,7 +259,8 @@ def main() -> None:
         }
         # Same derivation as train.sh, so the audit looks where the run wrote.
         effective_id = effective_setup_id(
-            setup, SMOKE_STEPS if SMOKE else None, ATTACK_TRAIN_FRACTION
+            setup, SMOKE_STEPS if SMOKE else None, ATTACK_TRAIN_FRACTION,
+            SPLIT_PROTOCOL,
         )
         prompt_folder = (
             "frozen_prompt"
