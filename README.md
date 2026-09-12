@@ -152,10 +152,11 @@ width, `category_specific=false`, and `deep_text_prompt_tuning=false`. The
 checkpoint SHA-256, epoch, suffixes, and prompt configuration are recorded in
 every artifact and manifest.
 
-## Relaxed margin/TopK objective
+## Margin/TopK objective (default)
 
-The four original setup IDs keep the segmentation-aware loss above. Four new
-`*_margin_topk` setup IDs select a separate relaxed objective:
+The margin/TopK objective is the default, so it adds nothing to a setup ID. The
+segmentation-aware loss above remains available under `*_ce_focal_dice` IDs.
+The default objective is:
 
 - Image-level score: `s(x) = z_abnormal(x) - z_normal(x)`.
 - `normal_to_abnormal` minimizes `-s(x + delta)`, which maximizes the abnormal
@@ -298,16 +299,16 @@ reproducibility field matches.
 
 For example, `RUN_SETUPS=all PROMPT_SETUP=learnable` runs all four learnable
 configurations. A frozen base ID can also act as the loss/epochs/epsilon choice:
-`RUN_SETUPS=ep7p14_cat100_img100_eps2_margin_topk PROMPT_SETUP=learnable` automatically
-runs `ep7p14_cat100_img100_eps2_margin_topk_learnable_prompt`. With `PROMPT_SETUP=both`,
+`RUN_SETUPS=ep7p14_cat100_img100_eps2 PROMPT_SETUP=learnable` automatically
+runs `ep7p14_cat100_img100_eps2_learnable_prompt`. With `PROMPT_SETUP=both`,
 the same base ID runs both prompt variants.
 
 | Base setup | Loss | Epoch budget | Linf epsilon |
 |---|---|---:|---:|
-| `ep7p14_cat100_img100_eps2` | legacy `ce_focal_dice` | 7.14 / 100 / 100 | 2/255 |
-| `ep7p14_cat100_img100_eps4` | legacy `ce_focal_dice` | 7.14 / 100 / 100 | 4/255 |
-| `ep7p14_cat100_img100_eps2_margin_topk` | relaxed `margin_topk` | 7.14 / 100 / 100 | 2/255 |
-| `ep7p14_cat100_img100_eps4_margin_topk` | relaxed `margin_topk` | 7.14 / 100 / 100 | 4/255 |
+| `ep7p14_cat100_img100_eps2` | default `margin_topk` | 7.14 / 100 / 100 | 2/255 |
+| `ep7p14_cat100_img100_eps4` | default `margin_topk` | 7.14 / 100 / 100 | 4/255 |
+| `ep7p14_cat100_img100_eps2_ce_focal_dice` | alternate `ce_focal_dice` | 7.14 / 100 / 100 | 2/255 |
+| `ep7p14_cat100_img100_eps4_ce_focal_dice` | alternate `ce_focal_dice` | 7.14 / 100 / 100 | 4/255 |
 
 The epoch budget column is the `dataset / category / image` triple. Each base ID
 above uses frozen WinCLIP prompts. Append `_learnable_prompt` to any base ID to
@@ -325,7 +326,7 @@ entries:
 |---|---|---|
 | epoch budgets | `7.14:100:100` | `SETUP_EPOCHS="5:60:50"` |
 | Linf budgets | `2/255, 4/255` | `SETUP_EPSILONS="2/255,4/255,8/255"` |
-| loss formulations | `ce_focal_dice, margin_topk` | fixed |
+| loss formulations | `margin_topk` (default), `ce_focal_dice` | fixed |
 | prompt families | `frozen_winclip, learnable_object_agnostic` | fixed |
 
 `SETUP_EPOCHS="50"` gives 4 setups all named `ep50_*`;
@@ -365,11 +366,11 @@ A setup ID is a pure function of the settings that change the work, so a run
 can never be filed under a name describing different parameters:
 
 ```
-epochs + epsilon + [margin_topk] + [protocol] + [trainNN] + [learnable_prompt]
+epochs + epsilon + [ce_focal_dice] + [protocol] + [trainNN] + [learnable_prompt]
 ```
 
 Overriding the epoch budget renames the output on its own. `SMOKE_EPOCHS=50`
-against `ep7p14_cat100_img100_eps4_margin_topk` writes to `ep50_eps4_margin_topk`,
+against `ep7p14_cat100_img100_eps4` writes to `ep50_eps4`,
 and `audit_generation.py` applies the same derivation, so it looks where the
 run actually wrote. When an override makes two catalog rows resolve to
 the same name, the launcher keeps the first and reports the collapse instead
@@ -430,10 +431,10 @@ inside it, avoiding duplicate copies of the same perturbations.
 For example, a MVTec dataset-level run is packaged as
 `canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2.zip`. Dataset, scope, epochs,
 epsilon, and loss setup remain separate. A relaxed-loss run uses a distinct
-name such as `canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_margin_topk.zip`
-and cannot overwrite the legacy setup.
+name such as `canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_ce_focal_dice.zip`
+and cannot overwrite the default-loss setup.
 Likewise, a learnable-prompt run has a distinct name such as
-`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_margin_topk_learnable_prompt.zip`.
+`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_ce_focal_dice_learnable_prompt.zip`.
 
 Do not merge these archives with the old `canonical_clip_*` bundles under the
 same dataset version. Publish them as a new Kaggle dataset version and rerun the

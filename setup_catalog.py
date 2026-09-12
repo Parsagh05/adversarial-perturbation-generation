@@ -121,8 +121,10 @@ def compose_setup_id(
         _epochs_tag(epochs, category_epochs, image_epochs),
         _epsilon_tag(epsilon_label),
     ]
-    if loss_formulation == "margin_topk":
-        parts.append("margin_topk")
+    # margin_topk is the default loss and adds nothing; ce_focal_dice names
+    # itself, so switching back to it cannot overwrite a default-loss run.
+    if loss_formulation == "ce_focal_dice":
+        parts.append("ce_focal_dice")
     protocol = _protocol_tag(split_protocol)
     if protocol:
         parts.append(protocol)

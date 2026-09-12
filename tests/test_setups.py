@@ -44,20 +44,25 @@ def _launcher_table(**overrides: str) -> list[list[str]]:
 
 
 class SetupCatalogTests(unittest.TestCase):
-    def test_legacy_and_relaxed_setups_are_separate(self) -> None:
-        legacy_ids = [
+    def test_default_and_alternate_losses_are_separate(self) -> None:
+        default_ids = [
             setup_id
             for setup_id, setup in SETUPS.items()
-            if setup.prompt_mode == "frozen_winclip" and "margin_topk" not in setup_id
+            if setup.prompt_mode == "frozen_winclip"
+            and "ce_focal_dice" not in setup_id
         ]
-        self.assertEqual(len(legacy_ids), 2)
-        for legacy_id in legacy_ids:
-            relaxed_id = f"{legacy_id}_margin_topk"
-            self.assertIn(relaxed_id, SETUPS)
-            self.assertEqual(SETUPS[legacy_id].loss_formulation, "ce_focal_dice")
-            self.assertEqual(SETUPS[relaxed_id].loss_formulation, "margin_topk")
-            self.assertEqual(SETUPS[legacy_id].epochs, SETUPS[relaxed_id].epochs)
-            self.assertEqual(SETUPS[legacy_id].epsilon, SETUPS[relaxed_id].epsilon)
+        self.assertEqual(len(default_ids), 2)
+        for default_id in default_ids:
+            alternate_id = f"{default_id}_ce_focal_dice"
+            self.assertIn(alternate_id, SETUPS)
+            self.assertEqual(SETUPS[default_id].loss_formulation, "margin_topk")
+            self.assertEqual(
+                SETUPS[alternate_id].loss_formulation, "ce_focal_dice"
+            )
+            self.assertEqual(SETUPS[default_id].epochs, SETUPS[alternate_id].epochs)
+            self.assertEqual(
+                SETUPS[default_id].epsilon, SETUPS[alternate_id].epsilon
+            )
 
     def test_each_frozen_setup_has_a_learnable_counterpart(self) -> None:
         frozen = {
@@ -126,28 +131,28 @@ class DerivedSetupIdTests(unittest.TestCase):
                 self.assertEqual(effective_setup_id(setup), setup_id)
 
     def test_changing_the_budget_renames_the_setup(self) -> None:
-        setup = SETUPS[f"{BASE}_eps4_margin_topk"]
-        self.assertEqual(effective_setup_id(setup, 12), "ep12_eps4_margin_topk")
-        self.assertEqual(effective_setup_id(setup, 0.5), "ep0p5_eps4_margin_topk")
+        setup = SETUPS[f"{BASE}_eps4"]
+        self.assertEqual(effective_setup_id(setup, 12), "ep12_eps4")
+        self.assertEqual(effective_setup_id(setup, 0.5), "ep0p5_eps4")
 
     def test_partial_train_fraction_is_folded_into_the_id(self) -> None:
-        setup = SETUPS[f"{BASE}_eps4_margin_topk"]
+        setup = SETUPS[f"{BASE}_eps4"]
         self.assertEqual(
             effective_setup_id(setup, attack_train_fraction=0.2),
-            f"{BASE}_eps4_margin_topk_train20",
+            f"{BASE}_eps4_train20",
         )
         # A full run keeps the plain name so existing outputs stay valid.
         self.assertEqual(
             effective_setup_id(setup, attack_train_fraction=1.0),
-            f"{BASE}_eps4_margin_topk",
+            f"{BASE}_eps4",
         )
 
     def test_learnable_suffix_stays_last_so_base_stripping_works(self) -> None:
-        setup = SETUPS[f"{BASE}_eps2_margin_topk_learnable_prompt"]
+        setup = SETUPS[f"{BASE}_eps2_learnable_prompt"]
         derived = effective_setup_id(setup, 12, 0.25)
         self.assertTrue(derived.endswith("_learnable_prompt"))
         self.assertEqual(
-            derived, "ep12_eps2_margin_topk_train25_learnable_prompt"
+            derived, "ep12_eps2_train25_learnable_prompt"
         )
 
     def test_distinct_configurations_never_share_a_name(self) -> None:
@@ -176,7 +181,7 @@ class SetupGridTests(unittest.TestCase):
             epsilons=("2/255", "4/255"),
         )
         self.assertEqual(len(widened), 16)
-        for loss_suffix in ("", "_margin_topk"):
+        for loss_suffix in ("", "_ce_focal_dice"):
             for prompt_suffix in ("", "_learnable_prompt"):
                 for epsilon in ("eps2", "eps4"):
                     name = f"ep12_{epsilon}{loss_suffix}{prompt_suffix}"
@@ -198,8 +203,8 @@ class SetupGridTests(unittest.TestCase):
             epochs_grid=((12, 12, 12),), epsilons=("2/255", "4/255", "8/255")
         )
         self.assertEqual(len(widened), 12)
-        self.assertIn("ep12_eps8_margin_topk", widened)
-        self.assertAlmostEqual(widened["ep12_eps8_margin_topk"].epsilon, 8 / 255)
+        self.assertIn("ep12_eps8", widened)
+        self.assertAlmostEqual(widened["ep12_eps8"].epsilon, 8 / 255)
 
     def test_generated_entries_are_self_naming(self) -> None:
         for grid in (
@@ -282,22 +287,22 @@ class SplitProtocolTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SPLIT_PROTOCOL", None)
             self.assertEqual(split_protocol_setting(), "balanced")
-        setup = SETUPS[f"{BASE}_eps4_margin_topk"]
-        self.assertEqual(effective_setup_id(setup), f"{BASE}_eps4_margin_topk")
+        setup = SETUPS[f"{BASE}_eps4"]
+        self.assertEqual(effective_setup_id(setup), f"{BASE}_eps4")
 
     def test_full_is_named_so_the_protocols_cannot_collide(self) -> None:
-        setup = SETUPS[f"{BASE}_eps4_margin_topk"]
+        setup = SETUPS[f"{BASE}_eps4"]
         self.assertEqual(
             effective_setup_id(setup, None, 1.0, "full"),
-            f"{BASE}_eps4_margin_topk_full",
+            f"{BASE}_eps4_full",
         )
         self.assertEqual(
             effective_setup_id(setup, None, 0.2, "full"),
-            f"{BASE}_eps4_margin_topk_full_train20",
+            f"{BASE}_eps4_full_train20",
         )
 
     def test_learnable_suffix_stays_last(self) -> None:
-        setup = SETUPS[f"{BASE}_eps2_margin_topk_learnable_prompt"]
+        setup = SETUPS[f"{BASE}_eps2_learnable_prompt"]
         derived = effective_setup_id(setup, None, 1.0, "full")
         self.assertTrue(derived.endswith("_learnable_prompt"))
         self.assertIn("_full_", derived)

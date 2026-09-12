@@ -39,16 +39,16 @@ bash train.sh
 
 The smoke test is only for checking the setup. It is not a final result.
 
-To smoke-test only the new relaxed loss, use:
+To smoke-test the alternate segmentation-aware loss, use:
 
 ```bash
-export RUN_SETUPS=ep7p14_cat100_img100_eps2_margin_topk
+export RUN_SETUPS=ep7p14_cat100_img100_eps2_ce_focal_dice
 ```
 
-To run the same relaxed loss with the learned object-agnostic MVTec prompt:
+To run the default loss with the learned object-agnostic MVTec prompt:
 
 ```bash
-export RUN_SETUPS=ep7p14_cat100_img100_eps2_margin_topk
+export RUN_SETUPS=ep7p14_cat100_img100_eps2
 export PROMPT_SETUP=learnable
 ```
 
@@ -65,7 +65,7 @@ evaluation-only VisA target does not. Frozen setup IDs ignore all of this.
 
 Use `PROMPT_SETUP=both` to run frozen and learnable variants together. You can
 still name one exact learnable ID, such as
-`RUN_SETUPS=ep7p14_cat100_img100_eps2_margin_topk_learnable_prompt`; set
+`RUN_SETUPS=ep7p14_cat100_img100_eps2_learnable_prompt`; set
 `PROMPT_SETUP=learnable` or `both` for that explicit selection.
 
 ## Complete run
@@ -117,8 +117,9 @@ single optimization pass.
 `full_outputs.zip` contains the complete setup tree but excludes the redundant
 per-scope ZIP files already stored inside individual setup directories.
 
-The default setup IDs are `ep7p14_cat100_img100_eps2` and `ep7p14_cat100_img100_eps4`. The new loss adds
-two more formed by appending `_margin_topk` to each. Every one of those four
+The default setup IDs are `ep7p14_cat100_img100_eps2` and `ep7p14_cat100_img100_eps4`, both using the
+default `margin_topk` loss. The alternate `ce_focal_dice` loss adds two more,
+formed by appending `_ce_focal_dice` to each. Every one of those four
 frozen-prompt IDs has a learnable counterpart formed by appending
 `_learnable_prompt`, for 8 setups in total. The learned contexts are shallow and object-agnostic; the pipeline
 does not perform AnomalyCLIP-style deep text-token tuning.
