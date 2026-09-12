@@ -24,7 +24,7 @@ PROMPT_SETUP = os.environ.get("PROMPT_SETUP", "both").strip().lower()
 SMOKE = os.environ.get("SMOKE_TEST", "false").lower() in {
     "1", "true", "yes", "on"
 }
-SMOKE_STEPS = int(os.environ.get("SMOKE_STEPS", "2"))
+SMOKE_EPOCHS = float(os.environ.get("SMOKE_EPOCHS", "0.02"))
 EXPECTED_ATTACK_SEED = int(os.environ.get("ATTACK_SEED", "111"))
 ATTACK_TRAIN_FRACTION = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 SPLIT_PROTOCOL = split_protocol_setting()
@@ -105,7 +105,7 @@ def audit_scope(
     setup_root: Path,
     scope: str,
     bundle_name: str,
-    expected_steps: dict[str, int],
+    expected_epochs: dict[str, float],
     expected_epsilon: float,
     expected_loss_formulation: str,
     expected_prompt_mode: str,
@@ -126,11 +126,19 @@ def audit_scope(
     diagnostics = pd.read_csv(diagnostics_path)
     if manifest.empty or diagnostics.empty or set(manifest.scope) != {scope}:
         raise RuntimeError(f"Invalid {scope} tables in {setup_root.name}")
-    if set(manifest.optimization_steps.astype(int)) != {expected_steps[scope]}:
+    # The step count is derived from the epoch budget and each condition's own
+    # training-set size, so one manifest legitimately holds several values; the
+    # budget is what must match.
+    if "optimization_epochs" not in manifest.columns:
+        raise RuntimeError(f"Missing optimization_epochs in {manifest_path}")
+    recorded = {round(float(value), 6) for value in manifest.optimization_epochs}
+    if recorded != {round(float(expected_epochs[scope]), 6)}:
         raise RuntimeError(
-            f"Wrong steps in {manifest_path}: scope {scope} expects "
-            f"{expected_steps[scope]}"
+            f"Wrong epoch budget in {manifest_path}: scope {scope} expects "
+            f"{expected_epochs[scope]}, found {sorted(recorded)}"
         )
+    if (manifest.optimization_steps.astype(int) < 1).any():
+        raise RuntimeError(f"Non-positive derived steps in {manifest_path}")
     if not manifest.epsilon.astype(float).map(
         lambda value: abs(value - expected_epsilon) <= 1e-12
     ).all():
@@ -251,15 +259,15 @@ def main() -> None:
     for setup_id in selected_setups():
         setup = SETUPS[setup_id]
         # cross_dataset delivers the per-dataset delta, so it shares its count.
-        expected_steps = {
-            "dataset": SMOKE_STEPS if SMOKE else setup.steps,
-            "cross_dataset": SMOKE_STEPS if SMOKE else setup.steps,
-            "per_category": SMOKE_STEPS if SMOKE else setup.category_steps,
-            "per_image": SMOKE_STEPS if SMOKE else setup.image_steps,
+        expected_epochs = {
+            "dataset": SMOKE_EPOCHS if SMOKE else setup.epochs,
+            "cross_dataset": SMOKE_EPOCHS if SMOKE else setup.epochs,
+            "per_category": SMOKE_EPOCHS if SMOKE else setup.category_epochs,
+            "per_image": SMOKE_EPOCHS if SMOKE else setup.image_epochs,
         }
         # Same derivation as train.sh, so the audit looks where the run wrote.
         effective_id = effective_setup_id(
-            setup, SMOKE_STEPS if SMOKE else None, ATTACK_TRAIN_FRACTION,
+            setup, SMOKE_EPOCHS if SMOKE else None, ATTACK_TRAIN_FRACTION,
             SPLIT_PROTOCOL,
         )
         prompt_folder = (
@@ -276,7 +284,7 @@ def main() -> None:
                         setup_root,
                         scope,
                         bundle_name,
-                        expected_steps,
+                        expected_epochs,
                         setup.epsilon,
                         setup.loss_formulation,
                         setup.prompt_mode,

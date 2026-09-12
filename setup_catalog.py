@@ -1,32 +1,39 @@
 """Canonical standalone generation setups.
 
 The matrix is generated from parameter lists rather than written out entry by
-entry, so widening a sweep means editing one list. ``SETUP_STEPS`` holds one
+entry, so widening a sweep means editing one list. ``SETUP_EPOCHS`` holds one
 ``dataset:category:image`` triple per configuration, because the scopes solve
 different problems: a per-dataset delta must satisfy hundreds of images at
 once, a per-category delta about a dozen, and a per-image delta exactly one.
-``SETUP_STEPS=800:200:100,500:150:50`` sweeps two such settings. A bare
-``500`` still means all three scopes use 500. Cross-dataset takes no value of
-its own: it delivers the per-dataset delta.
+``SETUP_EPOCHS=7.14:100:100,5:60:50`` sweeps two such settings. A bare ``100``
+means all three scopes use 100. Cross-dataset takes no value of its own: it
+delivers the per-dataset delta.
+
+An epoch is one pass over whatever that delta trains on, so the PGD step count
+is derived at run time as ``ceil(epochs * ceil(n_images / batch))``. That keeps
+the budget constant when the training set changes size, which it does between
+SPLIT_PROTOCOL=balanced and full. A per-image delta trains on one image, so
+there epochs and steps are the same number.
 
 A setup ID is a pure function of the settings that change the work, so a run
 can never be filed under a name that describes different parameters. Overriding
-steps to 1200 produces ``steps1200_...`` on its own.
+the epoch budget to 12 produces ``ep12_...`` on its own.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
+import math
 import os
 
 
 @dataclass(frozen=True)
 class Setup:
-    # Per-dataset steps; cross_dataset delivers this same delta.
-    steps: int
-    category_steps: int
-    image_steps: int
+    # Per-dataset epochs; cross_dataset delivers this same delta.
+    epochs: float
+    category_epochs: float
+    image_epochs: float
     epsilon: float
     epsilon_label: str
     loss_formulation: str
@@ -50,8 +57,6 @@ def _fraction_tag(attack_train_fraction: float) -> str:
 
 
 SPLIT_PROTOCOLS = ("balanced", "full")
-
-
 def _protocol_tag(split_protocol: str) -> str:
     """``""`` for the historical balanced protocol, ``full`` for the new one.
 
@@ -77,23 +82,28 @@ def split_protocol_setting() -> str:
     return protocol
 
 
-def _steps_tag(steps: int, category_steps: int, image_steps: int) -> str:
-    """``steps800`` when the scopes agree, ``steps800_cat200_img100`` when not.
+def _epoch_number(value: float) -> str:
+    """``7.14`` -> ``7p14``; keeps fractional budgets filesystem-safe."""
 
-    Keeping the compact form for a uniform setting leaves historical output
-    names untouched, the same way a full train fraction adds no component.
-    """
+    return f"{float(value):g}".replace(".", "p")
 
-    tag = f"steps{int(steps)}"
-    if int(category_steps) == int(steps) and int(image_steps) == int(steps):
+
+def _epochs_tag(epochs: float, category_epochs: float, image_epochs: float) -> str:
+    """``ep100`` when the scopes agree, ``ep7p14_cat100_img100`` when not."""
+
+    tag = f"ep{_epoch_number(epochs)}"
+    if float(category_epochs) == float(epochs) and float(image_epochs) == float(epochs):
         return tag
-    return f"{tag}_cat{int(category_steps)}_img{int(image_steps)}"
+    return (
+        f"{tag}_cat{_epoch_number(category_epochs)}"
+        f"_img{_epoch_number(image_epochs)}"
+    )
 
 
 def compose_setup_id(
-    steps: int,
-    category_steps: int,
-    image_steps: int,
+    epochs: float,
+    category_epochs: float,
+    image_epochs: float,
     epsilon_label: str,
     loss_formulation: str,
     prompt_mode: str,
@@ -108,7 +118,7 @@ def compose_setup_id(
     """
 
     parts = [
-        _steps_tag(steps, category_steps, image_steps),
+        _epochs_tag(epochs, category_epochs, image_epochs),
         _epsilon_tag(epsilon_label),
     ]
     if loss_formulation == "margin_topk":
@@ -126,19 +136,19 @@ def compose_setup_id(
 
 def effective_setup_id(
     setup: Setup,
-    steps: int | None = None,
+    epochs: float | None = None,
     attack_train_fraction: float = 1.0,
     split_protocol: str = "balanced",
 ) -> str:
-    """Canonical ID for a catalog entry after any step/fraction override.
+    """Canonical ID for a catalog entry after any epoch/fraction override.
 
-    ``steps`` overrides every scope at once, which is what SMOKE_TEST does.
+    ``epochs`` overrides every scope at once, which is what SMOKE_TEST does.
     """
 
     return compose_setup_id(
-        setup.steps if steps is None else steps,
-        setup.category_steps if steps is None else steps,
-        setup.image_steps if steps is None else steps,
+        setup.epochs if epochs is None else epochs,
+        setup.category_epochs if epochs is None else epochs,
+        setup.image_epochs if epochs is None else epochs,
         setup.epsilon_label,
         setup.loss_formulation,
         setup.prompt_mode,
@@ -174,32 +184,45 @@ def _unique_list(name: str, default: str) -> tuple[str, ...]:
     return values
 
 
-def step_grid() -> tuple[tuple[int, int, int], ...]:
-    """Per-scope step counts to sweep, as ``(dataset, category, image)`` triples.
+def epoch_grid() -> tuple[tuple[float, float, float], ...]:
+    """Per-scope epoch budgets, as ``(dataset, category, image)`` triples.
 
-    ``SETUP_STEPS=800:200:100,500`` sweeps a scope-specific setting and a
-    uniform one. A bare number expands to the same count for every scope.
+    ``SETUP_EPOCHS=7.14:100:100,5`` sweeps a scope-specific setting and a
+    uniform one. A bare number expands to the same budget for every scope.
     """
 
     grid = []
-    for entry in _unique_list("SETUP_STEPS", "500,800"):
+    for entry in _unique_list("SETUP_EPOCHS", "7.14:100:100"):
         parts = [part.strip() for part in entry.split(":")]
         if len(parts) == 1:
             parts = parts * 3
         if len(parts) != 3 or not all(parts):
             raise ValueError(
-                f"SETUP_STEPS entry must be N or dataset:category:image, got {entry!r}"
+                f"SETUP_EPOCHS entry must be N or dataset:category:image, got {entry!r}"
             )
         try:
-            values = tuple(int(part) for part in parts)
+            values = tuple(float(part) for part in parts)
         except ValueError as error:
-            raise ValueError(f"SETUP_STEPS entry is not numeric: {entry!r}") from error
+            raise ValueError(f"SETUP_EPOCHS entry is not numeric: {entry!r}") from error
         if any(value <= 0 for value in values):
-            raise ValueError(f"SETUP_STEPS must be positive: {entry!r}")
+            raise ValueError(f"SETUP_EPOCHS must be positive: {entry!r}")
         grid.append(values)
     if len(set(grid)) != len(grid):
-        raise ValueError(f"SETUP_STEPS contains duplicate settings: {tuple(grid)}")
+        raise ValueError(f"SETUP_EPOCHS contains duplicate settings: {tuple(grid)}")
     return tuple(grid)
+
+
+def derive_steps(epochs: float, n_images: int, batch_size: int) -> int:
+    """PGD updates for one delta: ``ceil(epochs * ceil(n_images / batch))``.
+
+    A per-image delta trains on a single image, so this returns the epoch
+    count unchanged and the two units coincide.
+    """
+
+    if n_images < 1 or batch_size < 1:
+        raise ValueError("n_images and batch_size must be positive")
+    updates_per_epoch = math.ceil(n_images / batch_size)
+    return max(1, math.ceil(float(epochs) * updates_per_epoch))
 
 
 def epsilon_grid() -> tuple[str, ...]:
@@ -216,30 +239,30 @@ PROMPT_MODES = ("frozen_winclip", "learnable_object_agnostic")
 
 
 def build_setups(
-    steps_grid: tuple[tuple[int, int, int], ...] | None = None,
+    epochs_grid: tuple[tuple[float, float, float], ...] | None = None,
     epsilons: tuple[str, ...] | None = None,
 ) -> dict[str, Setup]:
-    """Cartesian product over prompt family, loss, steps and epsilon.
+    """Cartesian product over prompt family, loss, epochs and epsilon.
 
     The iteration order groups by prompt family first, then loss formulation,
     matching how the setups are run and reported.
     """
 
-    steps_grid = step_grid() if steps_grid is None else steps_grid
+    epochs_grid = epoch_grid() if epochs_grid is None else epochs_grid
     epsilons = epsilon_grid() if epsilons is None else epsilons
     setups: dict[str, Setup] = {}
     for prompt_mode in PROMPT_MODES:
         for loss_formulation in LOSS_FORMULATIONS:
-            for steps, category_steps, image_steps in steps_grid:
+            for epochs, category_epochs, image_epochs in epochs_grid:
                 for label in epsilons:
                     setup_id = compose_setup_id(
-                        steps, category_steps, image_steps,
+                        epochs, category_epochs, image_epochs,
                         label, loss_formulation, prompt_mode,
                     )
                     setups[setup_id] = Setup(
-                        steps=steps,
-                        category_steps=category_steps,
-                        image_steps=image_steps,
+                        epochs=epochs,
+                        category_epochs=category_epochs,
+                        image_epochs=image_epochs,
                         epsilon=parse_epsilon(label),
                         epsilon_label=label,
                         loss_formulation=loss_formulation,

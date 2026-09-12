@@ -45,6 +45,7 @@ SETUP_ID = os.environ["SETUP_ID"]
 if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
+from setup_catalog import derive_steps
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import MVTecSample, discover_anomaly_datasets, load_image_tensor, load_mask
@@ -119,7 +120,10 @@ def chunked(sequence, size):
 IMAGE_SIZE = int(os.environ.get("IMAGE_SIZE", "518"))
 EPSILON = parse_numeric(os.environ["EPSILON"])
 STEP_SIZE = parse_numeric(os.environ["PER_IMAGE_STEP_SIZE"])
-PER_IMAGE_STEPS = int(os.environ["PER_IMAGE_STEPS"])
+# A per-image delta trains on exactly one image, so an epoch is one PGD
+# step and the two units coincide.
+PER_IMAGE_EPOCHS = float(os.environ["PER_IMAGE_EPOCHS"])
+PER_IMAGE_STEPS = derive_steps(PER_IMAGE_EPOCHS, 1, 1)
 EFFECTIVE_BATCH_SIZE = int(os.environ.get("PER_IMAGE_EFFECTIVE_BATCH_SIZE", "2"))
 MICRO_BATCH_SIZE = int(os.environ.get("PER_IMAGE_MICRO_BATCH_SIZE", "2"))
 LOCAL_FOCAL_WEIGHT = float(os.environ.get("LOCAL_FOCAL_WEIGHT", "0.5"))
@@ -131,7 +135,7 @@ NORMAL_LOCAL_TARGET = os.environ.get("NORMAL_LOCAL_TARGET", "fixed_region")
 NORMAL_TARGET_REGION_FRACTION = float(os.environ.get("NORMAL_TARGET_REGION_FRACTION", "0.25"))
 NORMAL_TARGET_CENTER_X = float(os.environ.get("NORMAL_TARGET_CENTER_X", "0.5"))
 NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
-STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "cosine")
+STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "linear")
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "8"))
 EVALUATION_FRACTION = float(os.environ.get("PER_IMAGE_EVALUATION_FRACTION", "1.0"))
@@ -446,6 +450,7 @@ for dataset_name in DATASETS:
                         "loss_formulation": LOSS_FORMULATION,
                         "epsilon": EPSILON,
                         "step_size": STEP_SIZE,
+                        "optimization_epochs": PER_IMAGE_EPOCHS,
                         "per_image_steps": PER_IMAGE_STEPS,
                         "image_size": IMAGE_SIZE,
                         "seed": SEED,
@@ -603,6 +608,7 @@ for row in artifact_rows:
         "image_size": IMAGE_SIZE,
         "epsilon": EPSILON,
         "step_size": STEP_SIZE,
+        "optimization_epochs": row["optimization_epochs"],
         "optimization_steps": PER_IMAGE_STEPS,
         "effective_batch_size": EFFECTIVE_BATCH_SIZE,
         "configured_micro_batch_size": MICRO_BATCH_SIZE,

@@ -9,15 +9,20 @@ OUTPUT_BASE="${OUTPUT_BASE:-/ABSOLUTE/PATH/TO/canonical_clip_outputs}"
 # loss formulations and the two prompt families. Setup IDs are derived from
 # these values, so new entries name themselves.
 #
-# Each SETUP_STEPS entry is one dataset:category:image triple, because the
+# Each SETUP_EPOCHS entry is one dataset:category:image triple, because the
 # scopes solve different problems: a per-dataset delta must satisfy hundreds
 # of images at once, a per-category delta about a dozen, a per-image delta
 # exactly one. cross_dataset takes no value: it delivers the per-dataset
 # delta. A bare number means all three scopes use it.
-#   SETUP_STEPS="800:200:100"            one scope-specific setting
-#   SETUP_STEPS="800:200:100,500:150:50" sweep two of them
-#   SETUP_STEPS="500,800"                two uniform settings
-SETUP_STEPS="${SETUP_STEPS:-500,800}"
+# An epoch is one pass over whatever that delta trains on; the runner derives
+# the PGD step count as ceil(epochs * ceil(n_images / batch)). Budgets therefore
+# stay constant when the training set changes size, as it does between
+# SPLIT_PROTOCOL=balanced and full. A per-image delta trains on one image, so
+# there an epoch is one PGD step.
+#   SETUP_EPOCHS="7.14:100:100"       reproduces the historical 800/200/100
+#   SETUP_EPOCHS="7.14:100:100,5:60:50"  sweep two of them
+#   SETUP_EPOCHS="100"                same budget for every scope
+SETUP_EPOCHS="${SETUP_EPOCHS:-7.14:100:100}"
 SETUP_EPSILONS="${SETUP_EPSILONS:-2/255,4/255}"
 
 # all, or a comma-separated subset of the generated setup IDs. Append
@@ -75,12 +80,12 @@ IMAGE_SIZE="${IMAGE_SIZE:-518}"
 ATTACK_SEED="${ATTACK_SEED:-111}"
 
 # Initial PGD step size, shared by every scope and decayed by
-# STEP_SIZE_SCHEDULE. Step counts are per scope; see SETUP_STEPS above.
+# STEP_SIZE_SCHEDULE. Step counts are derived per scope; see SETUP_EPOCHS above.
 INITIAL_STEP_SIZE="${INITIAL_STEP_SIZE:-0.25/255}"
 
 # Fast plumbing check. Smoke outputs are not benchmark results.
 SMOKE_TEST="${SMOKE_TEST:-false}"
-SMOKE_STEPS="${SMOKE_STEPS:-2}"
+SMOKE_EPOCHS="${SMOKE_EPOCHS:-0.02}"
 
 PER_DATASET_BATCH_SIZE="${PER_DATASET_BATCH_SIZE:-2}"
 
@@ -112,9 +117,12 @@ MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL="${MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORM
 LEARNABLE_PROMPT_MVTEC_CHECKPOINT="${LEARNABLE_PROMPT_MVTEC_CHECKPOINT:-/ABSOLUTE/PATH/TO/artifacts/prompts/mvtec/prompts_epoch15.pt}"
 LEARNABLE_PROMPT_VISA_CHECKPOINT="${LEARNABLE_PROMPT_VISA_CHECKPOINT:-/ABSOLUTE/PATH/TO/artifacts/prompts/visa/prompts_epoch15.pt}"
 
-# Cosine decay prevents a sign-PGD iterate from bouncing indefinitely on the
-# Linf boundary. Full-training checkpoint losses are recorded at this interval.
-STEP_SIZE_SCHEDULE="${STEP_SIZE_SCHEDULE:-cosine}"
+# Decay prevents a sign-PGD iterate from bouncing indefinitely on the Linf
+# boundary: the update is +-step_size regardless of gradient magnitude, so a
+# constant step can never settle. constant, cosine or linear; both decaying
+# schedules end at STEP_SIZE_MIN_RATIO and cover the same total distance,
+# cosine simply holds the large step longer. linear is the default.
+STEP_SIZE_SCHEDULE="${STEP_SIZE_SCHEDULE:-linear}"
 STEP_SIZE_MIN_RATIO="${STEP_SIZE_MIN_RATIO:-0.1}"
 # The full selected attack-training set is used for checkpoint selection.
 # Evaluate it periodically because a full pass after every PGD update is costly.

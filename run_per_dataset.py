@@ -42,6 +42,7 @@ SETUP_ID = os.environ["SETUP_ID"]
 if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
+from setup_catalog import derive_steps
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import (
@@ -116,7 +117,7 @@ def release_cuda() -> None:
 IMAGE_SIZE = int(os.environ.get("IMAGE_SIZE", "518"))
 EPSILON = parse_numeric(os.environ["EPSILON"])
 STEP_SIZE = parse_numeric(os.environ["PER_DATASET_STEP_SIZE"])
-UNIVERSAL_STEPS = int(os.environ["PER_DATASET_STEPS"])
+PER_DATASET_EPOCHS = float(os.environ["PER_DATASET_EPOCHS"])
 UNIVERSAL_BATCH_SIZE = int(os.environ.get("PER_DATASET_BATCH_SIZE", "1"))
 LOCAL_FOCAL_WEIGHT = float(os.environ.get("LOCAL_FOCAL_WEIGHT", "0.5"))
 LOCAL_DICE_WEIGHT = float(os.environ.get("LOCAL_DICE_WEIGHT", "0.5"))
@@ -127,7 +128,7 @@ NORMAL_LOCAL_TARGET = os.environ.get("NORMAL_LOCAL_TARGET", "fixed_region")
 NORMAL_TARGET_REGION_FRACTION = float(os.environ.get("NORMAL_TARGET_REGION_FRACTION", "0.25"))
 NORMAL_TARGET_CENTER_X = float(os.environ.get("NORMAL_TARGET_CENTER_X", "0.5"))
 NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
-STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "cosine")
+STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "linear")
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "10"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
@@ -287,7 +288,9 @@ attack_config = AttackConfig(
     epsilon=EPSILON,
     step_size=STEP_SIZE,
     steps=20,
-    universal_steps=UNIVERSAL_STEPS,
+    # Replaced per condition: the step count follows the epoch budget and
+    # that condition's own training-set size.
+    universal_steps=1,
     random_start=True,
     temperature=0.07,
     global_weight=0.2,
@@ -353,6 +356,12 @@ for source_dataset in SOURCE_DATASETS:
                 source_train = source_training_samples(
                     source_dataset, source_label, fraction_pool, use_full_source
                 )
+                condition_steps = derive_steps(
+                    PER_DATASET_EPOCHS, max(len(source_train), 1), UNIVERSAL_BATCH_SIZE
+                )
+                condition_config = replace(
+                    condition_config, universal_steps=condition_steps
+                )
                 if not source_train:
                     raise RuntimeError(
                         f"No attack_train images for {source_dataset}/{fraction}/{direction}"
@@ -374,7 +383,8 @@ for source_dataset in SOURCE_DATASETS:
                         "attack_train_fraction": fraction,
                         "epsilon": EPSILON,
                         "step_size": STEP_SIZE,
-                        "universal_steps": UNIVERSAL_STEPS,
+                        "optimization_epochs": PER_DATASET_EPOCHS,
+                        "universal_steps": condition_steps,
                         "universal_batch_size": UNIVERSAL_BATCH_SIZE,
                         "image_size": IMAGE_SIZE,
                         "seed": SEED,
@@ -426,7 +436,7 @@ for source_dataset in SOURCE_DATASETS:
                         run_seed = condition_seed(SEED, source_dataset, fraction, direction, loss_mode)
                         seed_everything(run_seed)
                         attacker = TargetedPGD(surrogate, condition_config)
-                        bar = tqdm(total=UNIVERSAL_STEPS, desc="PGD", unit="step")
+                        bar = tqdm(total=condition_steps, desc="PGD", unit="step")
 
                         def progress(step, total, metrics):
                             bar.update(step - bar.n)
@@ -587,7 +597,8 @@ for row in artifact_rows:
             "image_size": IMAGE_SIZE,
             "epsilon": EPSILON,
             "step_size": STEP_SIZE,
-            "optimization_steps": UNIVERSAL_STEPS,
+            "optimization_epochs": row["optimization_epochs"],
+            "optimization_steps": row["universal_steps"],
             "local_objective": row["local_objective"],
             "global_objective": row["global_objective"],
             "margin_topk_fraction": row["margin_topk_fraction"],

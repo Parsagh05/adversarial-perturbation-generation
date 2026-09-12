@@ -277,10 +277,15 @@ class TargetedPGD:
         if self.config.step_size_schedule == "constant" or total_steps <= 1:
             return self.config.step_size
         progress = step / max(total_steps - 1, 1)
-        cosine = 0.5 * (1.0 + np.cos(np.pi * progress))
+        if self.config.step_size_schedule == "linear":
+            # Straight decay to step_size_min_ratio; spends less of the budget
+            # at the large initial step than cosine does.
+            decay = 1.0 - progress
+        else:
+            decay = 0.5 * (1.0 + np.cos(np.pi * progress))
         ratio = self.config.step_size_min_ratio + (
             1.0 - self.config.step_size_min_ratio
-        ) * cosine
+        ) * decay
         return float(self.config.step_size * ratio)
 
     def objective_components(

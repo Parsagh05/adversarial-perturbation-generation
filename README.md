@@ -169,7 +169,7 @@ part of each category, deliver to the held-out part.
 
 The protocol is recorded so an evaluator can detect it:
 
-- the setup ID, e.g. `steps800_eps2_full` (`balanced` adds no component)
+- the setup ID, e.g. `ep7p14_cat100_img100_eps2_full` (`balanced` adds no component)
 - `label_balance_policy` on every protocol CSV row
 - `split_protocol` on every manifest and diagnostics row, plus `training_source`
   on per-dataset rows (`attack_train_partition` or `complete_source_dataset`)
@@ -261,27 +261,24 @@ reproducibility field matches.
 - `PROMPT_SETUP=learnable` runs only their object-agnostic learnable counterparts.
 - `PROMPT_SETUP=both` runs both families and is the default.
 
-For example, `RUN_SETUPS=all PROMPT_SETUP=learnable` runs all eight learnable
-configurations. A frozen base ID can also act as the loss/steps/epsilon choice:
-`RUN_SETUPS=steps500_eps2_margin_topk PROMPT_SETUP=learnable` automatically
-runs `steps500_eps2_margin_topk_learnable_prompt`. With `PROMPT_SETUP=both`,
+For example, `RUN_SETUPS=all PROMPT_SETUP=learnable` runs all four learnable
+configurations. A frozen base ID can also act as the loss/epochs/epsilon choice:
+`RUN_SETUPS=ep7p14_cat100_img100_eps2_margin_topk PROMPT_SETUP=learnable` automatically
+runs `ep7p14_cat100_img100_eps2_margin_topk_learnable_prompt`. With `PROMPT_SETUP=both`,
 the same base ID runs both prompt variants.
 
-| Base setup | Loss | PGD steps | Linf epsilon |
+| Base setup | Loss | Epoch budget | Linf epsilon |
 |---|---|---:|---:|
-| `steps500_eps2` | legacy `ce_focal_dice` | 500 | 2/255 |
-| `steps500_eps4` | legacy `ce_focal_dice` | 500 | 4/255 |
-| `steps800_eps2` | legacy `ce_focal_dice` | 800 | 2/255 |
-| `steps800_eps4` | legacy `ce_focal_dice` | 800 | 4/255 |
-| `steps500_eps2_margin_topk` | relaxed `margin_topk` | 500 | 2/255 |
-| `steps500_eps4_margin_topk` | relaxed `margin_topk` | 500 | 4/255 |
-| `steps800_eps2_margin_topk` | relaxed `margin_topk` | 800 | 2/255 |
-| `steps800_eps4_margin_topk` | relaxed `margin_topk` | 800 | 4/255 |
+| `ep7p14_cat100_img100_eps2` | legacy `ce_focal_dice` | 7.14 / 100 / 100 | 2/255 |
+| `ep7p14_cat100_img100_eps4` | legacy `ce_focal_dice` | 7.14 / 100 / 100 | 4/255 |
+| `ep7p14_cat100_img100_eps2_margin_topk` | relaxed `margin_topk` | 7.14 / 100 / 100 | 2/255 |
+| `ep7p14_cat100_img100_eps4_margin_topk` | relaxed `margin_topk` | 7.14 / 100 / 100 | 4/255 |
 
-Each base ID above uses frozen WinCLIP prompts. Append `_learnable_prompt` to
-any base ID to run exactly the same loss, steps, epsilon, and attack scopes with
-the object-agnostic learned checkpoint. Thus `RUN_SETUPS=all` runs 16 isolated
-setups: eight frozen and eight learnable.
+The epoch budget column is the `dataset / category / image` triple. Each base ID
+above uses frozen WinCLIP prompts. Append `_learnable_prompt` to any base ID to
+run exactly the same loss, epochs, epsilon, and attack scopes with the
+object-agnostic learned checkpoint. Thus `RUN_SETUPS=all` runs 8 isolated
+setups: four frozen and four learnable.
 
 ### The setup matrix is a grid, not a list
 
@@ -291,35 +288,41 @@ entries:
 
 | List | Default | Override |
 |---|---|---|
-| step counts | `500, 800` | `SETUP_STEPS="800:200:100"` |
+| epoch budgets | `7.14:100:100` | `SETUP_EPOCHS="5:60:50"` |
 | Linf budgets | `2/255, 4/255` | `SETUP_EPSILONS="2/255,4/255,8/255"` |
 | loss formulations | `ce_focal_dice, margin_topk` | fixed |
 | prompt families | `frozen_winclip, learnable_object_agnostic` | fixed |
 
-The defaults reproduce the original 16 setups exactly. `SETUP_STEPS="1200"`
-gives 8 setups all named `steps1200_*`; `SETUP_STEPS="500,800,1200"` gives 24.
-Because IDs are derived, generated entries name themselves and nothing else
-needs editing.
+`SETUP_EPOCHS="50"` gives 4 setups all named `ep50_*`;
+`SETUP_EPOCHS="7.14:100:100,50"` gives 8. Because IDs are derived, generated
+entries name themselves and nothing else needs editing.
 
-### Steps are per scope
+### Budgets are epochs, and each scope gets its own
 
-A `SETUP_STEPS` entry is a `dataset:category:image` triple. The scopes fit a
-very different number of images per delta, so a single count either
-undertrains the per-dataset scope or massively over-optimizes the others:
-at 500 steps a per-dataset delta makes 4.5 passes over its 224 training
-images, a per-category delta 286 passes over its ~14, and a per-image delta
-500 passes over the single image it attacks.
+An epoch is one pass over the images that delta trains on, and the PGD step
+count follows from it:
 
-`SETUP_STEPS="800:200:100"` therefore names itself
-`steps800_cat200_img100_eps2`, and each scope receives its own count.
-cross-dataset takes no value of its own because it delivers the per-dataset
-delta. A bare number keeps the compact `steps800_eps2` name and gives every
-scope the same count, so existing output names are unchanged.
+```
+steps = ceil(epochs * ceil(n_images / batch_size))
+```
 
-Note that per-image fits the very image it attacks, so "overfitting" does
-not apply there; its step count is purely a convergence choice. Checkpoint
-selection uses the attack-training loss, so it cannot detect overfitting in
-the universal scopes either -- the step count is the only regulariser.
+The scopes fit a very different number of images per delta, so a shared budget
+is meaningless in steps but meaningful in epochs. A `SETUP_EPOCHS` entry is
+still a `dataset:category:image` triple because the right number of passes
+differs per scope: the per-dataset delta generalises across 224 images and
+saturates early, whereas a per-image delta fits the one image it attacks and
+simply needs enough steps to converge.
+
+The default `7.14:100:100` reproduces the historical 800 / 200 / 100 step
+counts exactly at the default batch sizes, and names itself
+`ep7p14_cat100_img100_eps2`. cross-dataset takes no value of its own because it delivers the
+per-dataset delta. A bare number gives every scope the same budget and keeps
+the compact `ep50_eps2` form.
+
+Because steps are derived, a category holding more images automatically gets
+more steps at the same budget -- which is the point. Checkpoint selection uses
+the attack-training loss, so it cannot detect overfitting in the universal
+scopes; the epoch budget is the only regulariser.
 
 ### Setup IDs are derived, not stored
 
@@ -327,11 +330,11 @@ A setup ID is a pure function of the settings that change the work, so a run
 can never be filed under a name describing different parameters:
 
 ```
-steps + epsilon + [margin_topk] + [trainNN] + [learnable_prompt]
+epochs + epsilon + [margin_topk] + [protocol] + [trainNN] + [learnable_prompt]
 ```
 
-Overriding the step count renames the output on its own. `SMOKE_STEPS=1200`
-against `steps500_eps4_margin_topk` writes to `steps1200_eps4_margin_topk`,
+Overriding the epoch budget renames the output on its own. `SMOKE_EPOCHS=50`
+against `ep7p14_cat100_img100_eps4_margin_topk` writes to `ep50_eps4_margin_topk`,
 and `audit_generation.py` applies the same derivation, so it looks where the
 run actually wrote. When an override makes two catalog rows resolve to
 the same name, the launcher keeps the first and reports the collapse instead
@@ -341,8 +344,9 @@ of letting them overwrite each other.
 `_trainNN` component, so a 20% run lands in `..._train20` and cannot overwrite
 or pool with the 100% run. A full run adds nothing, keeping existing names.
 
-Do not set `PER_DATASET_STEPS` or the other per-scope step variables directly.
-They bypass the derivation and change the work without changing the name.
+Do not set `PER_DATASET_EPOCHS` or the other per-scope epoch variables
+directly. They bypass the derivation and change the work without changing the
+name.
 Other knobs (step size, loss weights, batch sizes, TopK fractions) are not in
 the ID; they are recorded in every artifact's metadata and checked by the
 reuse guard, so they are safe within one output tree but not across merged
@@ -389,12 +393,12 @@ diagnostics, protocols, and logs. Existing per-scope ZIP files are not nested
 inside it, avoiding duplicate copies of the same perturbations.
 
 For example, a MVTec dataset-level run is packaged as
-`canonical_clip_per_dataset_mvtec_steps500_eps2.zip`. Dataset, scope, steps,
+`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2.zip`. Dataset, scope, epochs,
 epsilon, and loss setup remain separate. A relaxed-loss run uses a distinct
-name such as `canonical_clip_per_dataset_mvtec_steps500_eps2_margin_topk.zip`
+name such as `canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_margin_topk.zip`
 and cannot overwrite the legacy setup.
 Likewise, a learnable-prompt run has a distinct name such as
-`canonical_clip_per_dataset_mvtec_steps500_eps2_margin_topk_learnable_prompt.zip`.
+`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_margin_topk_learnable_prompt.zip`.
 
 Do not merge these archives with the old `canonical_clip_*` bundles under the
 same dataset version. Publish them as a new Kaggle dataset version and rerun the

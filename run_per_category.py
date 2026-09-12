@@ -46,6 +46,7 @@ SETUP_ID = os.environ["SETUP_ID"]
 if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
+from setup_catalog import derive_steps
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import MVTecSample, discover_anomaly_datasets, load_image_tensor, load_mask
@@ -123,7 +124,7 @@ def chunked(sequence, size):
 IMAGE_SIZE = int(os.environ.get("IMAGE_SIZE", "518"))
 EPSILON = parse_numeric(os.environ["EPSILON"])
 UNIVERSAL_STEP_SIZE = parse_numeric(os.environ["PER_CATEGORY_STEP_SIZE"])
-UNIVERSAL_STEPS = int(os.environ["PER_CATEGORY_STEPS"])
+PER_CATEGORY_EPOCHS = float(os.environ["PER_CATEGORY_EPOCHS"])
 EFFECTIVE_BATCH_SIZE = int(os.environ.get("PER_CATEGORY_EFFECTIVE_BATCH_SIZE", "8"))
 MICRO_BATCH_SIZE = int(os.environ.get("PER_CATEGORY_MICRO_BATCH_SIZE", "2"))
 LOCAL_FOCAL_WEIGHT = float(os.environ.get("LOCAL_FOCAL_WEIGHT", "0.5"))
@@ -135,7 +136,7 @@ NORMAL_LOCAL_TARGET = os.environ.get("NORMAL_LOCAL_TARGET", "fixed_region")
 NORMAL_TARGET_REGION_FRACTION = float(os.environ.get("NORMAL_TARGET_REGION_FRACTION", "0.25"))
 NORMAL_TARGET_CENTER_X = float(os.environ.get("NORMAL_TARGET_CENTER_X", "0.5"))
 NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
-STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "cosine")
+STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "linear")
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "8"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
@@ -196,7 +197,7 @@ os.environ["ANOMALYCLIP_CLIP_CACHE"] = str(CLIP_CACHE)
 print("GPU:", torch.cuda.get_device_name(0))
 print("Protocol SHA256:", split_sha256())
 print("Attack-train fractions:", TRAIN_FRACTIONS)
-print("Universal steps / step size:", UNIVERSAL_STEPS, UNIVERSAL_STEP_SIZE)
+print("Epoch budget / step size:", PER_CATEGORY_EPOCHS, UNIVERSAL_STEP_SIZE)
 print("Effective batch / micro-batch:", EFFECTIVE_BATCH_SIZE, MICRO_BATCH_SIZE)
 print("Autocast:", AMP_DTYPE_NAME if AMP_ENABLED else "disabled; fp32 sign-PGD")
 
@@ -266,6 +267,7 @@ def optimize_accumulated(
     target_label: int,
     loss_mode: str,
     run_seed: int,
+    total_steps: int,
     mask_fn=None,
     progress=None,
 ):
@@ -297,7 +299,7 @@ def optimize_accumulated(
     best_diagnostic_loss = initial_losses["total"]
     selected_step = 0
 
-    for step in range(UNIVERSAL_STEPS):
+    for step in range(total_steps):
         logical_samples, cursor = draw_logical_batch(
             source_samples, order, cursor, rng, EFFECTIVE_BATCH_SIZE
         )
@@ -346,7 +348,7 @@ def optimize_accumulated(
                     + attacker.config.local_weight * accumulated_local
                     if loss_mode == "combined" else accumulated_total
                 )
-                step_size = attacker.step_size_at(step, UNIVERSAL_STEPS)
+                step_size = attacker.step_size_at(step, total_steps)
                 delta = (delta.detach() - step_size * gradient.sign()).clamp(
                     -EPSILON, EPSILON
                 ).detach()
@@ -354,7 +356,7 @@ def optimize_accumulated(
                 if (
                     step == 0
                     or (step + 1) % DIAGNOSTIC_INTERVAL == 0
-                    or step + 1 == UNIVERSAL_STEPS
+                    or step + 1 == total_steps
                 ):
                     fixed_losses = attacker._diagnostic_losses(
                         diagnostic_samples,
@@ -389,7 +391,7 @@ def optimize_accumulated(
                 }
                 history.append(record)
                 if progress is not None:
-                    progress(step + 1, UNIVERSAL_STEPS, record)
+                    progress(step + 1, total_steps, record)
                 break
             except Exception as error:
                 if not (AUTO_REDUCE_MICRO_BATCH_ON_OOM and is_cuda_oom(error) and micro_batch_size > 1):
@@ -436,7 +438,8 @@ attack_config = AttackConfig(
     epsilon=EPSILON,
     step_size=UNIVERSAL_STEP_SIZE,
     steps=10,
-    universal_steps=UNIVERSAL_STEPS,
+    # Replaced per condition; the category's own image count sets it.
+    universal_steps=1,
     random_start=True,
     temperature=0.07,
     global_weight=0.2,
@@ -519,6 +522,14 @@ for dataset_name in DATASETS:
                         key=lambda s: s.protocol_id,
                     )
                     attacked_eval = [s for s in eval_all if s.label == source_label]
+                    condition_steps = derive_steps(
+                        PER_CATEGORY_EPOCHS,
+                        max(len(train_samples), 1),
+                        EFFECTIVE_BATCH_SIZE,
+                    )
+                    condition_config = replace(
+                        condition_config, universal_steps=condition_steps
+                    )
                     if not train_samples or not attacked_eval:
                         raise RuntimeError(
                             f"Missing train/eval stratum for {dataset_name}/{category}/{direction}"
@@ -540,7 +551,8 @@ for dataset_name in DATASETS:
                             "attack_train_fraction": fraction,
                             "epsilon": EPSILON,
                             "step_size": UNIVERSAL_STEP_SIZE,
-                            "universal_steps": UNIVERSAL_STEPS,
+                            "optimization_epochs": PER_CATEGORY_EPOCHS,
+                            "universal_steps": condition_steps,
                             "image_size": IMAGE_SIZE,
                             "seed": SEED,
                             "protocol_split_sha256": protocol_sha,
@@ -591,7 +603,7 @@ for dataset_name in DATASETS:
                                 f"direction={direction} loss={loss_mode} train={len(train_samples)}"
                             )
                             attacker = TargetedPGD(surrogate, condition_config)
-                            bar = tqdm(total=UNIVERSAL_STEPS, desc="PGD", unit="step")
+                            bar = tqdm(total=condition_steps, desc="PGD", unit="step")
 
                             def progress(step, total, metrics):
                                 bar.update(step - bar.n)
@@ -612,6 +624,7 @@ for dataset_name in DATASETS:
                                 target_label,
                                 loss_mode,
                                 run_seed,
+                                condition_steps,
                                 mask_fn=(
                                     mask_loader
                                     if LOSS_FORMULATION == "ce_focal_dice"
@@ -714,7 +727,8 @@ for row in artifact_rows:
         "image_size": IMAGE_SIZE,
         "epsilon": EPSILON,
         "step_size": UNIVERSAL_STEP_SIZE,
-        "optimization_steps": UNIVERSAL_STEPS,
+        "optimization_epochs": row["optimization_epochs"],
+        "optimization_steps": row["universal_steps"],
         "effective_batch_size": EFFECTIVE_BATCH_SIZE,
         "configured_micro_batch_size": MICRO_BATCH_SIZE,
         "local_objective": row["local_objective"],

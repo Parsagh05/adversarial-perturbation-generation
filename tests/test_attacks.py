@@ -230,3 +230,37 @@ class MarginTopKLossTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StepSizeScheduleTests(unittest.TestCase):
+    """Both decaying schedules span the same range; only the shape differs."""
+
+    def _attacker(self, schedule: str) -> TargetedPGD:
+        return TargetedPGD(_FakeSurrogate(), AttackConfig(
+            steps=500, universal_steps=500, step_size=0.25 / 255,
+            step_size_schedule=schedule, step_size_min_ratio=0.1,
+        ))
+
+    def test_linear_and_cosine_share_endpoints(self) -> None:
+        for schedule in ("cosine", "linear"):
+            attacker = self._attacker(schedule)
+            with self.subTest(schedule=schedule):
+                self.assertAlmostEqual(attacker.step_size_at(0, 500), 0.25 / 255)
+                self.assertAlmostEqual(
+                    attacker.step_size_at(499, 500), 0.1 * 0.25 / 255, places=9
+                )
+
+    def test_linear_decays_monotonically(self) -> None:
+        attacker = self._attacker("linear")
+        sizes = [attacker.step_size_at(step, 500) for step in range(500)]
+        self.assertEqual(sizes, sorted(sizes, reverse=True))
+
+    def test_cosine_holds_the_large_step_longer(self) -> None:
+        # The schedules cross: cosine is above linear in the first half.
+        cosine, linear = self._attacker("cosine"), self._attacker("linear")
+        self.assertGreater(cosine.step_size_at(125, 500), linear.step_size_at(125, 500))
+        self.assertLess(cosine.step_size_at(375, 500), linear.step_size_at(375, 500))
+
+    def test_unknown_schedule_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            AttackConfig(step_size_schedule="exponential")

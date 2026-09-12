@@ -352,6 +352,9 @@ def ensemble_class_logits(
     Learnable banks already contain one normalized embedding per class, so the
     same two-prototype calculation applies to both prompt modes.
 
+    Both sides are L2-normalized, so this is a cosine classifier and only
+    direction counts, matching what backbone_eval and AnomalyCLIP score with.
+
     ``visual_features`` may be ``[B, D]`` (global) or ``[B, P, D]`` (patches).
     """
 
@@ -359,9 +362,9 @@ def ensemble_class_logits(
     prototypes = torch.cat(
         [bank.normal_embeddings, bank.abnormal_embeddings], dim=0
     ).float()
-    prototypes = torch.nn.functional.normalize(prototypes, dim=-1)
     if prototypes.shape[0] != 2:
         raise ValueError(
             "Prompt banks must contain one normal and one abnormal prototype"
         )
+    prototypes = torch.nn.functional.normalize(prototypes, dim=-1)
     return torch.matmul(features, prototypes.t()) / temperature

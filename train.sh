@@ -83,18 +83,18 @@ import os
 import sys
 from setup_catalog import SETUPS, effective_setup_id, split_protocol_setting
 
-# The effective steps and train fraction are known before any setup runs,
+# The effective epoch budget and train fraction are known before any setup runs,
 # so the output name is resolved here rather than after an override.
 smoke = os.environ.get("SMOKE_TEST", "false").strip().lower() in {"1", "true", "yes", "on"}
-override = int(os.environ["SMOKE_STEPS"]) if smoke else None
+override = float(os.environ["SMOKE_EPOCHS"]) if smoke else None
 fraction = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 protocol = split_protocol_setting()
 produced = {}
 for setup_id, setup in SETUPS.items():
     # A smoke override collapses every scope onto one count.
-    steps = setup.steps if override is None else override
-    category_steps = setup.category_steps if override is None else override
-    image_steps = setup.image_steps if override is None else override
+    epochs = setup.epochs if override is None else override
+    category_epochs = setup.category_epochs if override is None else override
+    image_epochs = setup.image_epochs if override is None else override
     effective = effective_setup_id(setup, override, fraction, protocol)
     if effective in produced:
         # A single step override collapses every step count onto one name, so
@@ -107,7 +107,7 @@ for setup_id, setup in SETUPS.items():
         continue
     produced[effective] = setup_id
     print("\t".join((
-        setup_id, str(steps), str(category_steps), str(image_steps),
+        setup_id, str(epochs), str(category_epochs), str(image_epochs),
         setup.epsilon_label, setup.loss_formulation, setup.prompt_mode,
         effective,
     )))
@@ -189,17 +189,17 @@ if [[ "$learnable_selected" == "true" ]]; then
   esac
 fi
 
-while IFS=$'\t' read -r id steps category_steps image_steps epsilon loss_formulation prompt_mode effective_id; do
+while IFS=$'\t' read -r id epochs category_epochs image_epochs epsilon loss_formulation prompt_mode effective_id; do
   selected "$id" "$prompt_mode" || continue
   if [[ "$prompt_mode" == "frozen_winclip" ]]; then
     prompt_folder="frozen_prompt"
   else
     prompt_folder="learnable_prompt"
   fi
-  # $steps already carries the smoke override, and $effective_id is derived
+  # $epochs already carries the smoke override, and $effective_id is derived
   # from it, so the directory name can never describe different parameters.
   setup_root="$PIPELINE_OUTPUT/setups/$prompt_folder/$effective_id"
-  echo "===== SETUP $effective_id (requested $id): prompt=$prompt_mode loss=$loss_formulation steps=dataset:$steps/category:$category_steps/image:$image_steps epsilon=$epsilon fraction=$ATTACK_TRAIN_FRACTION ====="
+  echo "===== SETUP $effective_id (requested $id): prompt=$prompt_mode loss=$loss_formulation epochs=dataset:$epochs/category:$category_epochs/image:$image_epochs epsilon=$epsilon fraction=$ATTACK_TRAIN_FRACTION ====="
   (
     export OUTPUT_BASE="$setup_root"
     export SETUP_ID="$effective_id"
@@ -210,11 +210,12 @@ while IFS=$'\t' read -r id steps category_steps image_steps epsilon loss_formula
     export LOSS_FORMULATION="$loss_formulation"
     export PROMPT_MODE="$prompt_mode"
     # Each scope fits a different number of images per delta, so each carries
-    # its own step count. cross_dataset delivers the per-dataset delta and so
-    # has no count of its own.
-    export PER_DATASET_STEPS="$steps"
-    export PER_CATEGORY_STEPS="$category_steps"
-    export PER_IMAGE_STEPS="$image_steps"
+    # its own epoch budget; the runner derives its PGD step count from that and
+    # its own training-set size. cross_dataset delivers the per-dataset delta
+    # and so has no budget of its own.
+    export PER_DATASET_EPOCHS="$epochs"
+    export PER_CATEGORY_EPOCHS="$category_epochs"
+    export PER_IMAGE_EPOCHS="$image_epochs"
     export PER_DATASET_STEP_SIZE="$INITIAL_STEP_SIZE"
     export PER_CATEGORY_STEP_SIZE="$INITIAL_STEP_SIZE"
     export PER_IMAGE_STEP_SIZE="$INITIAL_STEP_SIZE"

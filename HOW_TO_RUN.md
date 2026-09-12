@@ -25,14 +25,14 @@ export PYTHON_BIN="$(command -v python3)"
 
 export SOURCE_DATASETS=mvtec
 export EVALUATION_DATASETS=mvtec,visa
-export RUN_SETUPS=steps500_eps2
+export RUN_SETUPS=ep7p14_cat100_img100_eps2
 export PROMPT_SETUP=frozen
 export RUN_PER_DATASET=true
 export RUN_CROSS_DATASET=true
 export RUN_PER_CATEGORY=false
 export RUN_PER_IMAGE=false
 export SMOKE_TEST=true
-export SMOKE_STEPS=2
+export SMOKE_EPOCHS=0.02
 
 bash train.sh
 ```
@@ -42,7 +42,7 @@ The smoke test is only for checking the setup. It is not a final result.
 To smoke-test only the new relaxed loss, use:
 
 ```bash
-export RUN_SETUPS=steps500_eps2_margin_topk
+export RUN_SETUPS=ep7p14_cat100_img100_eps2_margin_topk
 ```
 
 To run the same relaxed loss with the learned object-agnostic MVTec prompt,
@@ -50,7 +50,7 @@ upload the prompt artifact to Kaggle (or copy it locally) and use:
 
 ```bash
 export LEARNABLE_PROMPT_MVTEC_CHECKPOINT=/absolute/path/to/artifacts/prompts/mvtec/prompts_epoch15.pt
-export RUN_SETUPS=steps500_eps2_margin_topk
+export RUN_SETUPS=ep7p14_cat100_img100_eps2_margin_topk
 export PROMPT_SETUP=learnable
 ```
 
@@ -61,7 +61,7 @@ Frozen setup IDs ignore these variables.
 
 Use `PROMPT_SETUP=both` to run frozen and learnable variants together. You can
 still name one exact learnable ID, such as
-`RUN_SETUPS=steps500_eps2_margin_topk_learnable_prompt`; set
+`RUN_SETUPS=ep7p14_cat100_img100_eps2_margin_topk_learnable_prompt`; set
 `PROMPT_SETUP=learnable` or `both` for that explicit selection.
 
 ## Complete run
@@ -113,9 +113,8 @@ single optimization pass.
 `full_outputs.zip` contains the complete setup tree but excludes the redundant
 per-scope ZIP files already stored inside individual setup directories.
 
-The legacy setup IDs are `steps500_eps2`, `steps500_eps4`, `steps800_eps2`, and
-`steps800_eps4`. The new loss has four separate setup IDs formed by appending
-`_margin_topk` to each legacy ID. Every one of those eight frozen-prompt IDs has
-a learnable counterpart formed by appending `_learnable_prompt`, for 16 setups
-in total. The learned contexts are shallow and object-agnostic; the pipeline
+The default setup IDs are `ep7p14_cat100_img100_eps2` and `ep7p14_cat100_img100_eps4`. The new loss adds
+two more formed by appending `_margin_topk` to each. Every one of those four
+frozen-prompt IDs has a learnable counterpart formed by appending
+`_learnable_prompt`, for 8 setups in total. The learned contexts are shallow and object-agnostic; the pipeline
 does not perform AnomalyCLIP-style deep text-token tuning.

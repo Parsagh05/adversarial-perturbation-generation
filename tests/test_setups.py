@@ -12,11 +12,14 @@ from setup_catalog import (
     SETUPS,
     build_setups,
     compose_setup_id,
+    derive_steps,
     effective_setup_id,
+    epoch_grid,
     epsilon_grid,
     split_protocol_setting,
-    step_grid,
 )
+
+BASE = "ep7p14_cat100_img100"
 
 
 def _launcher_table(**overrides: str) -> list[list[str]]:
@@ -29,7 +32,7 @@ def _launcher_table(**overrides: str) -> list[list[str]]:
     environment = {
         **os.environ,
         "SMOKE_TEST": "false",
-        "SMOKE_STEPS": "2",
+        "SMOKE_EPOCHS": "0.02",
         "ATTACK_TRAIN_FRACTION": "1.0",
         **overrides,
     }
@@ -47,13 +50,13 @@ class SetupCatalogTests(unittest.TestCase):
             for setup_id, setup in SETUPS.items()
             if setup.prompt_mode == "frozen_winclip" and "margin_topk" not in setup_id
         ]
-        self.assertEqual(len(legacy_ids), 4)
+        self.assertEqual(len(legacy_ids), 2)
         for legacy_id in legacy_ids:
             relaxed_id = f"{legacy_id}_margin_topk"
             self.assertIn(relaxed_id, SETUPS)
             self.assertEqual(SETUPS[legacy_id].loss_formulation, "ce_focal_dice")
             self.assertEqual(SETUPS[relaxed_id].loss_formulation, "margin_topk")
-            self.assertEqual(SETUPS[legacy_id].steps, SETUPS[relaxed_id].steps)
+            self.assertEqual(SETUPS[legacy_id].epochs, SETUPS[relaxed_id].epochs)
             self.assertEqual(SETUPS[legacy_id].epsilon, SETUPS[relaxed_id].epsilon)
 
     def test_each_frozen_setup_has_a_learnable_counterpart(self) -> None:
@@ -62,13 +65,13 @@ class SetupCatalogTests(unittest.TestCase):
             for setup_id, setup in SETUPS.items()
             if setup.prompt_mode == "frozen_winclip"
         }
-        self.assertEqual(len(frozen), 8)
+        self.assertEqual(len(frozen), 4)
         for setup_id, setup in frozen.items():
             counterpart_id = f"{setup_id}_learnable_prompt"
             self.assertIn(counterpart_id, SETUPS)
             counterpart = SETUPS[counterpart_id]
             self.assertEqual(counterpart.prompt_mode, "learnable_object_agnostic")
-            self.assertEqual(counterpart.steps, setup.steps)
+            self.assertEqual(counterpart.epochs, setup.epochs)
             self.assertEqual(counterpart.epsilon, setup.epsilon)
             self.assertEqual(counterpart.loss_formulation, setup.loss_formulation)
 
@@ -83,53 +86,74 @@ class SetupCatalogTests(unittest.TestCase):
         self.assertIn('prompt_folder="learnable_prompt"', launcher)
 
 
-class DerivedSetupIdTests(unittest.TestCase):
-    """The ID must be a function of the settings that change the work.
+class DeriveStepsTests(unittest.TestCase):
+    """An epoch is one pass over whatever the delta trains on."""
 
-    A stored name can drift from the parameters it claims to describe as soon
-    as anything overrides those parameters.
-    """
+    def test_reproduces_the_historical_step_counts(self) -> None:
+        # MVTec, balanced protocol: the budget that matches 800 / 200 / 100.
+        self.assertEqual(derive_steps(7.14, 224, 2), 800)   # per-dataset
+        self.assertEqual(derive_steps(100, 14, 8), 200)     # per-category
+        self.assertEqual(derive_steps(100, 1, 1), 100)      # per-image
+
+    def test_one_image_makes_epochs_and_steps_the_same_number(self) -> None:
+        for epochs in (1, 8, 100):
+            with self.subTest(epochs=epochs):
+                self.assertEqual(derive_steps(epochs, 1, 1), epochs)
+
+    def test_budget_is_invariant_to_training_set_size(self) -> None:
+        # Twice the images at the same budget means twice the updates, so each
+        # image is still seen the same number of times.
+        small = derive_steps(7.14, 224, 2)
+        large = derive_steps(7.14, 448, 2)
+        self.assertAlmostEqual(large / small, 2.0, places=1)
+
+    def test_rejects_degenerate_inputs(self) -> None:
+        for images, batch in ((0, 2), (10, 0), (-1, 1)):
+            with self.subTest(images=images, batch=batch):
+                with self.assertRaises(ValueError):
+                    derive_steps(10, images, batch)
+
+    def test_never_returns_zero(self) -> None:
+        self.assertEqual(derive_steps(0.001, 4, 8), 1)
+
+
+class DerivedSetupIdTests(unittest.TestCase):
+    """The ID must be a function of the settings that change the work."""
 
     def test_every_catalog_key_equals_its_own_derivation(self) -> None:
         for setup_id, setup in SETUPS.items():
             with self.subTest(setup_id=setup_id):
                 self.assertEqual(effective_setup_id(setup), setup_id)
 
-    def test_changing_steps_renames_the_setup(self) -> None:
-        setup = SETUPS["steps500_eps4_margin_topk"]
-        self.assertEqual(
-            effective_setup_id(setup, 1200), "steps1200_eps4_margin_topk"
-        )
-        self.assertEqual(effective_setup_id(setup, 2), "steps2_eps4_margin_topk")
+    def test_changing_the_budget_renames_the_setup(self) -> None:
+        setup = SETUPS[f"{BASE}_eps4_margin_topk"]
+        self.assertEqual(effective_setup_id(setup, 12), "ep12_eps4_margin_topk")
+        self.assertEqual(effective_setup_id(setup, 0.5), "ep0p5_eps4_margin_topk")
 
     def test_partial_train_fraction_is_folded_into_the_id(self) -> None:
-        setup = SETUPS["steps500_eps4_margin_topk"]
+        setup = SETUPS[f"{BASE}_eps4_margin_topk"]
         self.assertEqual(
             effective_setup_id(setup, attack_train_fraction=0.2),
-            "steps500_eps4_margin_topk_train20",
+            f"{BASE}_eps4_margin_topk_train20",
         )
-        self.assertEqual(
-            effective_setup_id(setup, attack_train_fraction=0.05),
-            "steps500_eps4_margin_topk_train5",
-        )
-        # A full run keeps the historical name so existing outputs stay valid.
+        # A full run keeps the plain name so existing outputs stay valid.
         self.assertEqual(
             effective_setup_id(setup, attack_train_fraction=1.0),
-            "steps500_eps4_margin_topk",
+            f"{BASE}_eps4_margin_topk",
         )
 
     def test_learnable_suffix_stays_last_so_base_stripping_works(self) -> None:
-        setup = SETUPS["steps500_eps2_margin_topk_learnable_prompt"]
-        derived = effective_setup_id(setup, 1200, 0.25)
+        setup = SETUPS[f"{BASE}_eps2_margin_topk_learnable_prompt"]
+        derived = effective_setup_id(setup, 12, 0.25)
         self.assertTrue(derived.endswith("_learnable_prompt"))
         self.assertEqual(
-            derived, "steps1200_eps2_margin_topk_train25_learnable_prompt"
+            derived, "ep12_eps2_margin_topk_train25_learnable_prompt"
         )
 
     def test_distinct_configurations_never_share_a_name(self) -> None:
         names = {
-            compose_setup_id(steps, steps, steps, eps, loss, prompt, fraction)
-            for steps in (500, 1200)
+            compose_setup_id(ep, ep, ep, eps, loss, prompt, fraction)
+            for ep in (7.14, 100)
             for eps in ("2/255", "4/255")
             for loss in ("ce_focal_dice", "margin_topk")
             for prompt in ("frozen_winclip", "learnable_object_agnostic")
@@ -141,58 +165,59 @@ class DerivedSetupIdTests(unittest.TestCase):
 class SetupGridTests(unittest.TestCase):
     """The matrix is generated from parameter lists, not written out by hand."""
 
-    def test_default_grid_reproduces_the_historical_matrix(self) -> None:
-        self.assertEqual(step_grid(), ((500, 500, 500), (800, 800, 800)))
+    def test_default_grid_reproduces_the_historical_budgets(self) -> None:
+        self.assertEqual(epoch_grid(), ((7.14, 100.0, 100.0),))
         self.assertEqual(epsilon_grid(), ("2/255", "4/255"))
-        self.assertEqual(len(SETUPS), 16)
+        self.assertEqual(len(SETUPS), 8)
 
-    def test_adding_a_step_count_widens_every_family_at_once(self) -> None:
+    def test_adding_a_budget_widens_every_family_at_once(self) -> None:
         widened = build_setups(
-            steps_grid=((500, 500, 500), (800, 800, 800), (1200, 1200, 1200)),
+            epochs_grid=((7.14, 100, 100), (12, 12, 12)),
             epsilons=("2/255", "4/255"),
         )
-        self.assertEqual(len(widened), 24)
+        self.assertEqual(len(widened), 16)
         for loss_suffix in ("", "_margin_topk"):
             for prompt_suffix in ("", "_learnable_prompt"):
                 for epsilon in ("eps2", "eps4"):
-                    name = f"steps1200_{epsilon}{loss_suffix}{prompt_suffix}"
+                    name = f"ep12_{epsilon}{loss_suffix}{prompt_suffix}"
                     with self.subTest(name=name):
                         self.assertIn(name, widened)
-                        self.assertEqual(widened[name].steps, 1200)
+                        self.assertEqual(widened[name].epochs, 12)
 
-    def test_a_single_step_count_halves_the_matrix(self) -> None:
+    def test_a_uniform_budget_uses_the_compact_name(self) -> None:
         narrowed = build_setups(
-            steps_grid=((1200, 1200, 1200),), epsilons=("2/255", "4/255")
+            epochs_grid=((12, 12, 12),), epsilons=("2/255", "4/255")
         )
         self.assertEqual(len(narrowed), 8)
-        self.assertTrue(all(setup.steps == 1200 for setup in narrowed.values()))
-        self.assertTrue(all(name.startswith("steps1200_") for name in narrowed))
+        self.assertTrue(all(setup.epochs == 12 for setup in narrowed.values()))
+        self.assertTrue(all(name.startswith("ep12_") for name in narrowed))
+        self.assertTrue(all("_cat" not in name for name in narrowed))
 
     def test_epsilon_grid_widens_the_same_way(self) -> None:
         widened = build_setups(
-            steps_grid=((500, 500, 500),), epsilons=("2/255", "4/255", "8/255")
+            epochs_grid=((12, 12, 12),), epsilons=("2/255", "4/255", "8/255")
         )
         self.assertEqual(len(widened), 12)
-        self.assertIn("steps500_eps8_margin_topk", widened)
-        self.assertAlmostEqual(widened["steps500_eps8_margin_topk"].epsilon, 8 / 255)
+        self.assertIn("ep12_eps8_margin_topk", widened)
+        self.assertAlmostEqual(widened["ep12_eps8_margin_topk"].epsilon, 8 / 255)
 
     def test_generated_entries_are_self_naming(self) -> None:
         for grid in (
-            ((300, 300, 300),),
-            ((500, 500, 500), (800, 800, 800)),
-            ((100, 40, 20), (1200, 300, 150)),
+            ((3, 3, 3),),
+            ((7.14, 100, 100), (12, 12, 12)),
+            ((1, 40, 20), (12, 300, 150)),
         ):
-            generated = build_setups(steps_grid=grid, epsilons=("1/255", "16/255"))
+            generated = build_setups(epochs_grid=grid, epsilons=("1/255", "16/255"))
             for setup_id, setup in generated.items():
                 with self.subTest(setup_id=setup_id):
                     self.assertEqual(effective_setup_id(setup), setup_id)
 
-    def test_grid_rejects_duplicates_and_non_positive_steps(self) -> None:
-        for value in ("500,500", "0", "-100"):
+    def test_grid_rejects_duplicates_and_non_positive_budgets(self) -> None:
+        for value in ("12,12", "0", "-5"):
             with self.subTest(value=value):
-                with mock.patch.dict(os.environ, {"SETUP_STEPS": value}):
+                with mock.patch.dict(os.environ, {"SETUP_EPOCHS": value}):
                     with self.assertRaises(ValueError):
-                        step_grid()
+                        epoch_grid()
 
 
 class ShellLauncherTests(unittest.TestCase):
@@ -206,63 +231,41 @@ class ShellLauncherTests(unittest.TestCase):
         rows = _launcher_table()
         expected = [
             [
-                setup_id, str(setup.steps), str(setup.category_steps),
-                str(setup.image_steps), setup.epsilon_label,
+                setup_id, str(setup.epochs), str(setup.category_epochs),
+                str(setup.image_epochs), setup.epsilon_label,
                 setup.loss_formulation, setup.prompt_mode, setup_id,
             ]
             for setup_id, setup in SETUPS.items()
         ]
         self.assertEqual(rows, expected)
 
-    def test_launcher_output_name_follows_a_step_override(self) -> None:
-        """The bug this guards: smoke steps changed the work but not the name."""
-
-        rows = _launcher_table(SMOKE_TEST="true", SMOKE_STEPS="1200")
-        # 500 and 800 both become 1200, so the matrix must collapse rather than
-        # emit two rows that would overwrite each other's output directory.
-        self.assertEqual(len(rows), len(SETUPS) // len(step_grid()))
-        self.assertEqual(len({row[7] for row in rows}), len(rows))
+    def test_launcher_exports_a_budget_per_scope(self) -> None:
+        rows = _launcher_table(SETUP_EPOCHS="7.14:100:100")
         for row in rows:
-            requested, steps, effective = row[0], row[1], row[7]
-            with self.subTest(requested=requested):
-                self.assertEqual(steps, "1200")
-                self.assertTrue(effective.startswith("steps1200_"), effective)
-                self.assertNotEqual(effective, requested)
+            with self.subTest(requested=row[0]):
+                self.assertEqual((row[1], row[2], row[3]), ("7.14", "100.0", "100.0"))
+                self.assertTrue(row[7].startswith("ep7p14_cat100_img100_"), row[7])
+        launcher = (Path(__file__).resolve().parents[1] / "train.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('export PER_DATASET_EPOCHS="$epochs"', launcher)
+        self.assertIn('export PER_CATEGORY_EPOCHS="$category_epochs"', launcher)
+        self.assertIn('export PER_IMAGE_EPOCHS="$image_epochs"', launcher)
+
+    def test_smoke_override_collapses_every_scope(self) -> None:
+        rows = _launcher_table(SMOKE_TEST="true", SMOKE_EPOCHS="3")
+        for row in rows:
+            with self.subTest(requested=row[0]):
+                self.assertEqual((row[1], row[2], row[3]), ("3.0", "3.0", "3.0"))
+                # uniform again, so the name returns to its compact form
+                self.assertTrue(row[7].startswith("ep3_"), row[7])
+                self.assertNotIn("_cat", row[7])
 
     def test_launcher_output_name_follows_the_train_fraction(self) -> None:
         rows = _launcher_table(ATTACK_TRAIN_FRACTION="0.2")
         for row in rows:
-            effective = row[7]
-            with self.subTest(effective=effective):
-                self.assertIn("_train20", effective)
-
-    def test_launcher_exports_a_step_count_per_scope(self) -> None:
-        rows = _launcher_table(SETUP_STEPS="800:200:100")
-        for row in rows:
-            requested, dataset, category, image, effective = (
-                row[0], row[1], row[2], row[3], row[7]
-            )
-            with self.subTest(requested=requested):
-                self.assertEqual((dataset, category, image), ("800", "200", "100"))
-                self.assertTrue(effective.startswith("steps800_cat200_img100_"),
-                                effective)
-        launcher = (Path(__file__).resolve().parents[1] / "train.sh").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn('export PER_DATASET_STEPS="$steps"', launcher)
-        self.assertIn('export PER_CATEGORY_STEPS="$category_steps"', launcher)
-        self.assertIn('export PER_IMAGE_STEPS="$image_steps"', launcher)
-
-    def test_smoke_override_collapses_every_scope(self) -> None:
-        rows = _launcher_table(
-            SETUP_STEPS="800:200:100", SMOKE_TEST="true", SMOKE_STEPS="3"
-        )
-        for row in rows:
-            with self.subTest(requested=row[0]):
-                self.assertEqual((row[1], row[2], row[3]), ("3", "3", "3"))
-                # uniform again, so the name returns to its compact form
-                self.assertTrue(row[7].startswith("steps3_"), row[7])
-                self.assertNotIn("_cat", row[7])
+            with self.subTest(effective=row[7]):
+                self.assertIn("_train20", row[7])
 
     def test_launcher_uses_the_effective_name_for_output_and_label(self) -> None:
         launcher = (Path(__file__).resolve().parents[1] / "train.sh").read_text(
@@ -270,11 +273,6 @@ class ShellLauncherTests(unittest.TestCase):
         )
         self.assertIn('setups/$prompt_folder/$effective_id', launcher)
         self.assertIn('export SETUP_ID="$effective_id"', launcher)
-        self.assertNotIn('steps="$SMOKE_STEPS"', launcher)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class SplitProtocolTests(unittest.TestCase):
@@ -284,22 +282,22 @@ class SplitProtocolTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SPLIT_PROTOCOL", None)
             self.assertEqual(split_protocol_setting(), "balanced")
-        setup = SETUPS["steps500_eps4_margin_topk"]
-        self.assertEqual(effective_setup_id(setup), "steps500_eps4_margin_topk")
+        setup = SETUPS[f"{BASE}_eps4_margin_topk"]
+        self.assertEqual(effective_setup_id(setup), f"{BASE}_eps4_margin_topk")
 
     def test_full_is_named_so_the_protocols_cannot_collide(self) -> None:
-        setup = SETUPS["steps500_eps4_margin_topk"]
+        setup = SETUPS[f"{BASE}_eps4_margin_topk"]
         self.assertEqual(
             effective_setup_id(setup, None, 1.0, "full"),
-            "steps500_eps4_margin_topk_full",
+            f"{BASE}_eps4_margin_topk_full",
         )
         self.assertEqual(
             effective_setup_id(setup, None, 0.2, "full"),
-            "steps500_eps4_margin_topk_full_train20",
+            f"{BASE}_eps4_margin_topk_full_train20",
         )
 
     def test_learnable_suffix_stays_last(self) -> None:
-        setup = SETUPS["steps500_eps2_margin_topk_learnable_prompt"]
+        setup = SETUPS[f"{BASE}_eps2_margin_topk_learnable_prompt"]
         derived = effective_setup_id(setup, None, 1.0, "full")
         self.assertTrue(derived.endswith("_learnable_prompt"))
         self.assertIn("_full_", derived)
@@ -320,3 +318,7 @@ class SplitProtocolTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('SPLIT_PROTOCOL="${SPLIT_PROTOCOL:-balanced}"', config)
+
+
+if __name__ == "__main__":
+    unittest.main()
