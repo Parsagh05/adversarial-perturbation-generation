@@ -168,27 +168,6 @@ done <<< "$SETUP_TABLE"
   exit 2
 }
 
-learnable_selected=false
-while IFS=$'\t' read -r id _ _ _ _ _ prompt_mode _; do
-  if selected "$id" "$prompt_mode" && [[ "$prompt_mode" == "learnable_object_agnostic" ]]; then
-    learnable_selected=true
-  fi
-done <<< "$SETUP_TABLE"
-if [[ "$learnable_selected" == "true" ]]; then
-  case ",$SOURCE_DATASETS," in
-    *,mvtec,*) [[ -f "$LEARNABLE_PROMPT_MVTEC_CHECKPOINT" ]] || {
-      echo "Missing MVTec learnable-prompt checkpoint: $LEARNABLE_PROMPT_MVTEC_CHECKPOINT" >&2
-      exit 2
-    } ;;
-  esac
-  case ",$SOURCE_DATASETS," in
-    *,visa,*) [[ -f "$LEARNABLE_PROMPT_VISA_CHECKPOINT" ]] || {
-      echo "Missing VisA learnable-prompt checkpoint: $LEARNABLE_PROMPT_VISA_CHECKPOINT" >&2
-      exit 2
-    } ;;
-  esac
-fi
-
 while IFS=$'\t' read -r id epochs category_epochs image_epochs epsilon loss_formulation prompt_mode effective_id; do
   selected "$id" "$prompt_mode" || continue
   if [[ "$prompt_mode" == "frozen_winclip" ]]; then
@@ -224,6 +203,16 @@ while IFS=$'\t' read -r id epochs category_epochs image_epochs epsilon loss_form
     mkdir -p "$PROTOCOL_DIR" "$setup_root/logs"
 
     "$PYTHON" "$ROOT/common.py" split | tee "$setup_root/logs/00_split.log"
+
+    if [[ "$prompt_mode" == "learnable_object_agnostic" ]]; then
+      # Resolved after the split so the prompts can be fitted on this run's own
+      # attack-training cohort. Progress goes to stderr and the log; stdout is
+      # the resolved checkpoint paths, which replace whatever config.sh held.
+      prompt_env="$setup_root/logs/01_prompts.env"
+      "$PYTHON" "$ROOT/ensure_prompt_checkpoint.py" 2>&1 >"$prompt_env" \
+        | tee "$setup_root/logs/01_prompts.log" >&2
+      source "$prompt_env"
+    fi
 
     run_mode() {
       local enabled="$1" name="$2" script="$3"

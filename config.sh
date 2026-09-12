@@ -112,10 +112,30 @@ NORMAL_TARGET_CENTER_Y="${NORMAL_TARGET_CENTER_Y:-0.5}"
 MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL="${MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL:-0.20}"
 MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL="${MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL:-0.40}"
 
-# Upload the prompt-training artifacts to Kaggle and replace these sample paths.
-# Only *_learnable_prompt setups read them; frozen setups ignore them.
-LEARNABLE_PROMPT_MVTEC_CHECKPOINT="${LEARNABLE_PROMPT_MVTEC_CHECKPOINT:-/ABSOLUTE/PATH/TO/artifacts/prompts/mvtec/prompts_epoch15.pt}"
-LEARNABLE_PROMPT_VISA_CHECKPOINT="${LEARNABLE_PROMPT_VISA_CHECKPOINT:-/ABSOLUTE/PATH/TO/artifacts/prompts/visa/prompts_epoch15.pt}"
+# Only *_learnable_prompt setups read any of this; frozen setups ignore it.
+#
+# Prompts fitted under one SPLIT_PROTOCOL or ATTACK_TRAIN_FRACTION saw
+# different images than a run using another, and pairing them raises no error
+# on either side. Leave both paths empty and the launcher resolves the
+# checkpoint these settings require under PROMPT_TRAINING_OUTPUT_ROOT,
+# training one if it is not there. Set a path to prefer a specific checkpoint;
+# it is still rejected and retrained when it describes a different split.
+LEARNABLE_PROMPT_MVTEC_CHECKPOINT="${LEARNABLE_PROMPT_MVTEC_CHECKPOINT:-}"
+LEARNABLE_PROMPT_VISA_CHECKPOINT="${LEARNABLE_PROMPT_VISA_CHECKPOINT:-}"
+
+# Checkpoints are filed by cohort, so balanced and full never overwrite each
+# other: <root>/<protocol>[_trainNN]/<dataset>/prompts_epoch<N>.pt
+PROMPT_TRAINING_OUTPUT_ROOT="${PROMPT_TRAINING_OUTPUT_ROOT:-$OUTPUT_BASE/prompts}"
+# Point PROMPT_TRAINING_ROOT at a local clone to skip the fetch entirely.
+PROMPT_TRAINING_ROOT="${PROMPT_TRAINING_ROOT:-}"
+PROMPT_TRAINING_GIT_URL="${PROMPT_TRAINING_GIT_URL:-https://github.com/Parsagh05/object-agnostic-prompt-training.git}"
+# The branch tip is taken at run time rather than a pinned commit, so the
+# prompts always come from the current training code. The commit it resolved
+# to is logged and recorded in the checkpoint's manifest.json.
+PROMPT_TRAINING_BRANCH="${PROMPT_TRAINING_BRANCH:-main}"
+# The published checkpoints were fitted with these; changing either retrains.
+PROMPT_TRAINING_EPOCHS="${PROMPT_TRAINING_EPOCHS:-15}"
+PROMPT_TRAINING_BATCH_SIZE="${PROMPT_TRAINING_BATCH_SIZE:-2}"
 
 # Decay prevents a sign-PGD iterate from bouncing indefinitely on the Linf
 # boundary: the update is +-step_size regardless of gradient magnitude, so a

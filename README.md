@@ -99,11 +99,9 @@ Every frozen setup also has a separate counterpart ending in
 produced by
 [`object-agnostic-prompt-training`](https://github.com/Parsagh05/object-agnostic-prompt-training):
 
-- MVTec: `artifacts/prompts/mvtec/prompts_epoch15.pt`
-- VisA: `artifacts/prompts/visa/prompts_epoch15.pt`
-
-Set `LEARNABLE_PROMPT_MVTEC_CHECKPOINT` and
-`LEARNABLE_PROMPT_VISA_CHECKPOINT` to their Kaggle paths. The implementation is
+The checkpoints are resolved automatically; see
+[Prompt checkpoints follow the split](#prompt-checkpoints-follow-the-split).
+The implementation is
 [CoOp](https://github.com/KaiyangZhou/CoOp)-style: it inserts the learned normal
 and abnormal context tensors into the ordinary public-CLIP text encoder. The
 prompts are object-agnostic, so one
@@ -111,6 +109,43 @@ normal/abnormal pair is reused across all categories in its source dataset. A
 fixed textual suffix such as `object.` or `damaged object.` is retained from
 the checkpoint configuration. There is no deep token tuning inside text
 transformer layers, and prompts are not retrained during attack generation.
+
+### Prompt checkpoints follow the split
+
+Prompts fitted under one `SPLIT_PROTOCOL` or `ATTACK_TRAIN_FRACTION` saw a
+different set of images than a run using another, so pairing them means the
+prompts have already seen part of what this run holds out. Neither repository
+raises on that by itself.
+
+So the launcher resolves the checkpoint rather than trusting a configured path.
+Before each learnable setup it looks for one matching this run's dataset, split
+protocol, attack-train fraction, split seed and epoch count, and runs
+`object-agnostic-prompt-training` when there is none:
+
+```
+PROMPT_TRAINING_OUTPUT_ROOT/<protocol>[_trainNN]/<dataset>/prompts_epoch<N>.pt
+```
+
+The directory carries the same suffix the setup ID does, so `balanced` and
+`full` never overwrite each other and a fraction sweep files each cohort
+separately. Training receives this run's own `attack_train_indices.csv` as its
+manifest, so the prompts are fitted on the images the perturbation is optimized
+on by construction; the training pipeline additionally asserts the split seed,
+evaluation fraction and label policy stamped on those rows against its own
+configuration and refuses to run when they disagree.
+
+`LEARNABLE_PROMPT_MVTEC_CHECKPOINT` and `LEARNABLE_PROMPT_VISA_CHECKPOINT` still
+work and take precedence, but only when the checkpoint they name describes this
+run's split. A checkpoint that does not is reported and retrained rather than
+used. Checkpoints written before the training pipeline recorded its split are
+read as `balanced` at a full fraction, which is what they are.
+
+Training code is taken from the tip of `PROMPT_TRAINING_BRANCH` at run time
+rather than a pinned commit, and the commit it resolved to is logged and
+recorded in the checkpoint's `manifest.json`. Set `PROMPT_TRAINING_ROOT` to a
+local clone to skip the fetch, or
+`PROMPT_TRAINING_EPOCHS` / `PROMPT_TRAINING_BATCH_SIZE` to change the budget.
+The defaults reproduce the published checkpoints.
 
 The loader validates schema version, source dataset, context shape, CLIP text
 width, `category_specific=false`, and `deep_text_prompt_tuning=false`. The

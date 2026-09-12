@@ -45,19 +45,23 @@ To smoke-test only the new relaxed loss, use:
 export RUN_SETUPS=ep7p14_cat100_img100_eps2_margin_topk
 ```
 
-To run the same relaxed loss with the learned object-agnostic MVTec prompt,
-upload the prompt artifact to Kaggle (or copy it locally) and use:
+To run the same relaxed loss with the learned object-agnostic MVTec prompt:
 
 ```bash
-export LEARNABLE_PROMPT_MVTEC_CHECKPOINT=/absolute/path/to/artifacts/prompts/mvtec/prompts_epoch15.pt
 export RUN_SETUPS=ep7p14_cat100_img100_eps2_margin_topk
 export PROMPT_SETUP=learnable
 ```
 
-For VisA learnable setups, set `LEARNABLE_PROMPT_VISA_CHECKPOINT` to the VisA
-checkpoint. Only source datasets require learned-prompt checkpoints; an
-evaluation-only VisA target does not require the VisA prompt checkpoint.
-Frozen setup IDs ignore these variables.
+No checkpoint path is required. The launcher looks for prompts matching this
+run's split protocol, attack-train fraction, split seed and epoch count under
+`PROMPT_TRAINING_OUTPUT_ROOT`, and trains them with
+`object-agnostic-prompt-training` when there are none. Training happens once per
+cohort and is reused by every later setup sharing it.
+
+Set `LEARNABLE_PROMPT_MVTEC_CHECKPOINT` or `LEARNABLE_PROMPT_VISA_CHECKPOINT` to
+prefer a specific checkpoint. It is used only if it describes this run's split,
+and is reported and retrained otherwise. Only source datasets need prompts; an
+evaluation-only VisA target does not. Frozen setup IDs ignore all of this.
 
 Use `PROMPT_SETUP=both` to run frozen and learnable variants together. You can
 still name one exact learnable ID, such as
