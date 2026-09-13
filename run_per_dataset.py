@@ -164,8 +164,10 @@ for dataset_name, dataset_root in (("mvtec", MVTEC_ROOT), ("visa", VISA_ROOT)):
 
 if set(DIRECTIONS) != {"normal_to_abnormal", "abnormal_to_normal"}:
     raise ValueError(f"Unexpected DIRECTIONS: {DIRECTIONS}")
-if set(LOSS_MODES) != {"global", "local", "combined"}:
-    raise ValueError(f"Unexpected LOSS_MODES: {LOSS_MODES}")
+# LOSS_MODES is a selection, not a fixed set: every use below iterates over it,
+# and AttackConfig rejects an empty list or an unknown name. Requiring all three
+# here made this the only scope that refused a subset, so LOSS_MODES=global,local
+# ran under per_category and per_image and aborted at the dataset scope.
 
 # Deltas are optimized once into this store no matter which delivery bundles
 # are requested; the path is unchanged so existing artifacts still reuse.

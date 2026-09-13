@@ -264,3 +264,38 @@ class StepSizeScheduleTests(unittest.TestCase):
     def test_unknown_schedule_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             AttackConfig(step_size_schedule="exponential")
+
+
+class LossModeSelectionTests(unittest.TestCase):
+    """LOSS_MODES selects which objectives run; it is not a fixed set.
+
+    run_per_dataset.py used to require all three, so LOSS_MODES=global,local
+    ran under per_category and per_image and then aborted at the dataset
+    scope. Validation belongs to AttackConfig, which every runner builds.
+    """
+
+    def test_a_subset_of_loss_modes_is_accepted(self) -> None:
+        for modes in (
+            ("global",),
+            ("local",),
+            ("combined",),
+            ("global", "local"),
+            ("global", "local", "combined"),
+        ):
+            with self.subTest(modes=modes):
+                self.assertEqual(AttackConfig(loss_modes=modes).loss_modes, modes)
+
+    def test_unknown_or_empty_loss_modes_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown loss_modes"):
+            AttackConfig(loss_modes=("global", "segmentation"))
+        with self.assertRaisesRegex(ValueError, "loss_modes cannot be empty"):
+            AttackConfig(loss_modes=())
+
+    def test_no_runner_requires_the_complete_set(self) -> None:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        for name in ("run_per_dataset.py", "run_per_category.py", "run_per_image.py"):
+            with self.subTest(runner=name):
+                source = (root / name).read_text(encoding="utf-8")
+                self.assertNotIn("set(LOSS_MODES) !=", source)
