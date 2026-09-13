@@ -162,12 +162,12 @@ for dataset_name, dataset_root in (("mvtec", MVTEC_ROOT), ("visa", VISA_ROOT)):
     if dataset_name in PROTOCOL_DATASETS and not dataset_root.is_dir():
         raise FileNotFoundError(dataset_root)
 
-if set(DIRECTIONS) != {"normal_to_abnormal", "abnormal_to_normal"}:
-    raise ValueError(f"Unexpected DIRECTIONS: {DIRECTIONS}")
-# LOSS_MODES is a selection, not a fixed set: every use below iterates over it,
-# and AttackConfig rejects an empty list or an unknown name. Requiring all three
-# here made this the only scope that refused a subset, so LOSS_MODES=global,local
-# ran under per_category and per_image and aborted at the dataset scope.
+# DIRECTIONS and LOSS_MODES are selections, not fixed sets: every use below
+# iterates over them, and AttackConfig rejects an empty list or an unknown name.
+# Requiring the complete set here made this the only scope that refused a
+# subset, so LOSS_MODES=global,local ran under per_category and per_image and
+# aborted at the dataset scope. audit_generation.py reads the same two
+# variables, so it checks for what the run was asked to produce.
 
 # Deltas are optimized once into this store no matter which delivery bundles
 # are requested; the path is unchanged so existing artifacts still reuse.

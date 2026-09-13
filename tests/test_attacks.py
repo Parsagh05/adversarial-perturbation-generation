@@ -299,3 +299,84 @@ class LossModeSelectionTests(unittest.TestCase):
             with self.subTest(runner=name):
                 source = (root / name).read_text(encoding="utf-8")
                 self.assertNotIn("set(LOSS_MODES) !=", source)
+
+
+class DirectionSelectionTests(unittest.TestCase):
+    """DIRECTIONS selects which attack directions run, like LOSS_MODES.
+
+    run_per_dataset.py used to require both. The audit is what made that look
+    necessary: it demanded both directions in every manifest group. It now
+    reads DIRECTIONS itself, so a one-direction run audits cleanly and a run
+    that silently dropped a requested direction still fails.
+    """
+
+    def test_a_single_direction_is_accepted(self) -> None:
+        for directions in (
+            ("normal_to_abnormal",),
+            ("abnormal_to_normal",),
+            ("normal_to_abnormal", "abnormal_to_normal"),
+        ):
+            with self.subTest(directions=directions):
+                self.assertEqual(
+                    AttackConfig(directions=directions).directions, directions
+                )
+
+    def test_unknown_or_empty_directions_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown directions"):
+            AttackConfig(directions=("normal_to_abnormal", "sideways"))
+        with self.assertRaisesRegex(ValueError, "directions cannot be empty"):
+            AttackConfig(directions=())
+
+    def test_no_runner_requires_both_directions(self) -> None:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        for name in ("run_per_dataset.py", "run_per_category.py", "run_per_image.py"):
+            with self.subTest(runner=name):
+                source = (root / name).read_text(encoding="utf-8")
+                self.assertNotIn("set(DIRECTIONS) !=", source)
+
+
+class AuditDirectionExpectationTests(unittest.TestCase):
+    """The audit checks the directions the run was asked to produce."""
+
+    def _audit(self, **environment):
+        import importlib
+        import os
+        import sys
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"OUTPUT_BASE": tmp}
+            base.update({k: v for k, v in environment.items() if v is not None})
+            with mock.patch.dict(os.environ, base, clear=False):
+                for key, value in environment.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                sys.modules.pop("audit_generation", None)
+                try:
+                    return importlib.import_module("audit_generation")
+                finally:
+                    sys.modules.pop("audit_generation", None)
+
+    def test_defaults_to_both_directions(self) -> None:
+        module = self._audit(DIRECTIONS=None)
+        self.assertEqual(
+            set(module.EXPECTED_DIRECTIONS),
+            {"normal_to_abnormal", "abnormal_to_normal"},
+        )
+
+    def test_an_explicitly_empty_value_is_rejected(self) -> None:
+        # Matches the runners: csv_tuple("") is empty and AttackConfig refuses
+        # an empty selection, so the audit must not silently fall back.
+        with self.assertRaises(ValueError):
+            self._audit(DIRECTIONS="")
+
+    def test_follows_a_single_requested_direction(self) -> None:
+        module = self._audit(DIRECTIONS="normal_to_abnormal")
+        self.assertEqual(module.EXPECTED_DIRECTIONS, ("normal_to_abnormal",))
+
+    def test_rejects_an_unknown_direction(self) -> None:
+        with self.assertRaises(ValueError):
+            self._audit(DIRECTIONS="normal_to_abnormal,sideways")

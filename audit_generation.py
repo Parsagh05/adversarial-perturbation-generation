@@ -10,12 +10,20 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from adversarial_harness.config import VALID_DIRECTIONS
 from adversarial_harness.prompts import (
     FROZEN_PROMPT_AGGREGATION,
     LEARNABLE_PROMPT_AGGREGATION,
     frozen_ensemble_sha256,
 )
 from setup_catalog import SETUPS, effective_setup_id, split_protocol_setting
+
+
+def _csv_env(name: str, default: str) -> tuple[str, ...]:
+    return tuple(
+        value.strip() for value in os.environ.get(name, default).split(",")
+        if value.strip()
+    )
 
 
 ROOT = Path(os.environ["OUTPUT_BASE"]).expanduser().resolve()
@@ -28,6 +36,15 @@ SMOKE_EPOCHS = float(os.environ.get("SMOKE_EPOCHS", "0.02"))
 EXPECTED_ATTACK_SEED = int(os.environ.get("ATTACK_SEED", "111"))
 ATTACK_TRAIN_FRACTION = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 SPLIT_PROTOCOL = split_protocol_setting()
+# Read the same way the runners read it, so auditing a run that generated one
+# direction checks for that direction instead of reporting the other missing.
+EXPECTED_DIRECTIONS = _csv_env("DIRECTIONS", ",".join(VALID_DIRECTIONS))
+_unknown_directions = sorted(set(EXPECTED_DIRECTIONS) - set(VALID_DIRECTIONS))
+if not EXPECTED_DIRECTIONS or _unknown_directions:
+    raise ValueError(
+        f"DIRECTIONS must be a non-empty subset of {VALID_DIRECTIONS}, "
+        f"got {EXPECTED_DIRECTIONS}"
+    )
 
 SCOPES = {
     "dataset": (
@@ -243,8 +260,12 @@ def audit_scope(
         by_direction = group.groupby("direction")[
             ["attack_train_image_count", "evaluation_attacked_image_count"]
         ].first()
-        if set(by_direction.index) != {"normal_to_abnormal", "abnormal_to_normal"}:
-            raise RuntimeError(f"Missing direction in {manifest_path}")
+        found_directions = set(by_direction.index)
+        if found_directions != set(EXPECTED_DIRECTIONS):
+            raise RuntimeError(
+                f"Expected directions {sorted(EXPECTED_DIRECTIONS)}, found "
+                f"{sorted(found_directions)} in {manifest_path}"
+            )
         if scope != "per_image" and by_direction.attack_train_image_count.nunique() != 1:
             raise RuntimeError(f"Direction train counts differ in {manifest_path}")
         if by_direction.evaluation_attacked_image_count.nunique() != 1:
