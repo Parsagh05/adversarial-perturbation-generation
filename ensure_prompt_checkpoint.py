@@ -43,6 +43,21 @@ def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run a child process without letting it write to our stdout.
+
+    stdout carries the `export` lines the launcher sources, so anything a
+    child prints there is sourced as a shell command and kills the run. git
+    and the training pipeline both print progress to stdout, so their output
+    is folded into stderr instead: still in the log, just not in the env file.
+    """
+
+    kwargs.setdefault("check", True)
+    if not kwargs.get("capture_output"):
+        kwargs.setdefault("stdout", sys.stderr)
+    return subprocess.run(command, **kwargs)
+
+
 def cohort_directory(split_protocol: str, attack_train_fraction: float) -> str:
     """``full`` at 25% -> ``full_train25``; a full ``balanced`` stays bare.
 
@@ -168,20 +183,11 @@ def resolve_training_repo(work_dir: Path) -> Path:
     root = work_dir / "object-agnostic-prompt-training"
     if not (root / ".git").is_dir():
         root.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["git", "clone", "--filter=blob:none", "--no-checkout", url, str(root)],
-            check=True,
-        )
-    subprocess.run(
-        ["git", "-C", str(root), "fetch", "--depth", "1", "origin", branch], check=True
-    )
-    subprocess.run(
-        ["git", "-C", str(root), "checkout", "--detach", "--force", "FETCH_HEAD"],
-        check=True,
-    )
-    head = subprocess.run(
+        run(["git", "clone", "--filter=blob:none", "--no-checkout", url, str(root)])
+    run(["git", "-C", str(root), "fetch", "--depth", "1", "origin", branch])
+    run(["git", "-C", str(root), "checkout", "--detach", "--force", "FETCH_HEAD"])
+    head = run(
         ["git", "-C", str(root), "rev-parse", "HEAD"],
-        check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
@@ -269,7 +275,7 @@ def train_prompts(repo_root: Path, config_path: Path, dataset: str) -> None:
         dataset,
     ]
     log(f"[prompt training] {' '.join(shlex.quote(part) for part in command)}")
-    subprocess.run(command, check=True, cwd=str(repo_root), env=environment)
+    run(command, cwd=str(repo_root), env=environment)
 
 
 def ensure(dataset: str) -> Path:

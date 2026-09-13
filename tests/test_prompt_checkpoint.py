@@ -372,3 +372,44 @@ class TrainingRepositoryContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StdoutIsolationTests(unittest.TestCase):
+    """stdout carries only the export lines the launcher sources.
+
+    train.sh redirects this script's stdout into 01_prompts.env and sources
+    it. Child processes inherit stdout by default, so git and the training
+    pipeline wrote their progress into that file, and sourcing it ran the
+    first line as a shell command. Under `set -e` the run died, after the
+    training itself had already succeeded.
+    """
+
+    def test_a_child_process_cannot_write_to_our_stdout(self):
+        import subprocess
+        import sys
+
+        root = Path(__file__).resolve().parents[1]
+        script = "\n".join((
+            f"import sys; sys.path.insert(0, {str(root)!r})",
+            "import ensure_prompt_checkpoint as module",
+            "module.run([sys.executable, '-c', \"print('CHILD_NOISE')\"])",
+            "print(\"export LEARNABLE_PROMPT_MVTEC_CHECKPOINT='/tmp/p.pt'\")",
+        ))
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, check=True, cwd=str(root),
+        )
+        # Everything the launcher would source, and nothing else.
+        self.assertEqual(
+            completed.stdout.strip(),
+            "export LEARNABLE_PROMPT_MVTEC_CHECKPOINT='/tmp/p.pt'",
+        )
+        # The child's output is not lost, only moved.
+        self.assertIn("CHILD_NOISE", completed.stderr)
+
+    def test_every_child_process_goes_through_the_helper(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "ensure_prompt_checkpoint.py"
+        ).read_text(encoding="utf-8")
+        # One call inside run() itself; any other is a fresh leak.
+        self.assertEqual(source.count("subprocess.run("), 1)
