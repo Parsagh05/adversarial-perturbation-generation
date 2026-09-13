@@ -55,3 +55,56 @@ class DatasetRoutingContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompleteSourceLeakageCheckTests(unittest.TestCase):
+    """The leakage check compares a delta with what it is actually attacked on.
+
+    Under SPLIT_PROTOCOL=full the generator deliberately fits one delta on the
+    complete source dataset, including that source's own evaluation half, and
+    delivers it only to the other dataset. Comparing it against every
+    evaluation id flagged that as leakage and aborted the run, so `full` could
+    not be generated with cross-dataset delivery at all.
+    """
+
+    def test_check_uses_the_delivered_ids(self) -> None:
+        script = (ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
+        self.assertIn("overlap = train_ids & set(attacked_eval_ids)", script)
+        # The old artifact-level form compared against every evaluation id.
+        self.assertNotIn("if train_ids & evaluation_ids:", script)
+
+    def test_check_runs_after_the_delivered_set_is_known(self) -> None:
+        script = (ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
+        computed = script.index("attacked_eval_ids = sorted(")
+        checked = script.index("overlap = train_ids & set(attacked_eval_ids)")
+        appended = script.index("delivery_rows[setting].append({")
+        self.assertLess(computed, checked)
+        self.assertLess(checked, appended)
+
+    def test_the_pre_generation_protocol_check_is_kept(self) -> None:
+        script = (ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
+        self.assertIn("if attack_train_ids & evaluation_ids:", script)
+
+    def test_protocol_ids_never_collide_across_datasets(self) -> None:
+        """Why delivering a complete-source delta to the other dataset is safe.
+
+        VisA ids are namespaced and MVTec ids are not, so a delta fitted on
+        every MVTec image cannot contain a VisA id. Without this the complete
+        source delta would be unsafe rather than merely unusual.
+        """
+
+        from adversarial_harness.dataset import MVTecSample
+
+        def ids(dataset: str) -> set:
+            return {
+                MVTecSample(
+                    index=0, category=category, defect_type=defect,
+                    image_path=Path(f"/{dataset}/{category}/{defect}/000.png"),
+                    mask_path=None, label=1, split=split, dataset=dataset,
+                ).protocol_id
+                for category in ("bottle", "candle", "visa")
+                for defect in ("good", "broken_large")
+                for split in ("train", "test")
+            }
+
+        self.assertEqual(ids("mvtec") & ids("visa"), set())

@@ -546,8 +546,6 @@ for row in artifact_rows:
     if float(delta.abs().max()) > EPSILON + 1e-6:
         raise RuntimeError(f"Budget violation in {artifact}")
     train_ids = set(row["attack_train_sample_ids"])
-    if train_ids & evaluation_ids:
-        raise RuntimeError(f"Leakage in artifact {artifact}")
     relative_noise = artifact.relative_to(OUTPUT_ROOT)
     unique_noise_paths.append(artifact)
     for target_dataset in EVALUATION_DATASETS:
@@ -570,6 +568,18 @@ for row in artifact_rows:
             and s.label == row["source_label"]
             and (deliver_whole_target or assignments[s.protocol_id] == "evaluation")
         )
+        # The invariant is that a delta never trains on the images it is
+        # attacked against, so compare it with what this bundle actually
+        # delivers. Comparing against every evaluation id instead flagged the
+        # complete-source delta that "full" creates on purpose: it trains on
+        # all of the source including the source's own evaluation half, which
+        # is why it is only ever delivered to the other dataset.
+        overlap = train_ids & set(attacked_eval_ids)
+        if overlap:
+            raise RuntimeError(
+                f"Leakage: {artifact} trains on {len(overlap)} of the images it "
+                f"attacks in {target_dataset} ({setting})"
+            )
         delivery_rows[setting].append({
             "scope": BUNDLE_SCOPES[setting],
             "source_dataset": row["source_dataset"],
