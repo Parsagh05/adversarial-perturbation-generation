@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -133,10 +134,12 @@ class _EnsureCase(unittest.TestCase):
             "PROMPT_TRAINING_EPOCHS": "15",
             "PROMPT_TRAINING_BATCH_SIZE": "2",
             "PROMPT_TRAINING_OUTPUT_ROOT": str(self.root / "prompts"),
+            "PROMPT_TRAINING_SEARCH_ROOTS": "",
             "WORK_DIR": str(self.root / "runtime"),
             "ATTACK_TRAIN_CSV": str(manifest),
             "LEARNABLE_PROMPT_MVTEC_CHECKPOINT": "",
         }
+        self.published = self.root / "published"
 
     def write(self, path: Path, payload: dict) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,10 +241,70 @@ class EnsureTests(_EnsureCase):
                     self.run_ensure()
 
 
+class SearchRootTests(_EnsureCase):
+    """Published prompts are read from search roots and never written to."""
+
+    def published_path(self, protocol: str = "balanced", fraction: float = 1.0) -> Path:
+        return checkpoint_path(self.published, protocol, fraction, "mvtec", 15)
+
+    def test_published_checkpoint_is_used_without_training(self):
+        expected = self.write(self.published_path(), _payload())
+        with mock.patch.object(ensure_module, "train_prompts") as trainer:
+            resolved = self.run_ensure(
+                PROMPT_TRAINING_SEARCH_ROOTS=str(self.published)
+            )
+        self.assertEqual(resolved, expected)
+        trainer.assert_not_called()
+
+    def test_published_checkpoint_wins_over_a_later_root(self):
+        expected = self.write(self.published_path(), _payload())
+        other = self.root / "other"
+        self.write(checkpoint_path(other, "balanced", 1.0, "mvtec", 15), _payload())
+        with mock.patch.object(ensure_module, "train_prompts"):
+            resolved = self.run_ensure(
+                PROMPT_TRAINING_SEARCH_ROOTS=f"{self.published},{other}"
+            )
+        self.assertEqual(resolved, expected)
+
+    def test_mismatched_published_checkpoint_retrains_into_the_output_root(self):
+        # The published tree is read-only, so training must not target it.
+        stale = self.write(self.published_path(), _payload(seed=999))
+        target = self.derived()
+
+        def fake_train(config_path, dataset):
+            document = json.loads(Path(config_path).read_text(encoding="utf-8"))
+            self.assertEqual(
+                document["artifacts"]["output_root"],
+                self.environment["PROMPT_TRAINING_OUTPUT_ROOT"],
+            )
+            self.write(target, _payload())
+
+        with mock.patch.object(ensure_module, "resolve_training_repo") as repo:
+            repo.return_value = self.root / "repo"
+            with mock.patch.object(
+                ensure_module, "train_prompts", lambda r, c, d: fake_train(c, d)
+            ):
+                resolved = self.run_ensure(
+                    PROMPT_TRAINING_SEARCH_ROOTS=str(self.published)
+                )
+        self.assertEqual(resolved, target)
+        # The published checkpoint is left exactly as it was.
+        self.assertTrue(stale.is_file())
+        untouched = torch.load(stale, map_location="cpu", weights_only=True)
+        self.assertEqual(untouched["seed"], 999)
+
+    def test_a_missing_search_root_is_skipped(self):
+        expected = self.write(self.derived(), _payload())
+        with mock.patch.object(ensure_module, "train_prompts") as trainer:
+            resolved = self.run_ensure(
+                PROMPT_TRAINING_SEARCH_ROOTS=str(self.root / "absent")
+            )
+        self.assertEqual(resolved, expected)
+        trainer.assert_not_called()
+
+
 class TrainingConfigTests(_EnsureCase):
     def test_config_pins_the_split_and_hands_over_the_manifest(self):
-        import json
-
         captured = {}
 
         def fake_train(repo_root, config_path, dataset):

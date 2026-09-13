@@ -68,6 +68,28 @@ def checkpoint_path(
     return output_root / cohort / dataset / f"prompts_epoch{epochs}.pt"
 
 
+def search_roots() -> list[Path]:
+    """Read-only prompt trees to look in before the writable output root.
+
+    The published checkpoints are mounted read-only on Kaggle, so they can be
+    read but never written. Keeping them here rather than in
+    PROMPT_TRAINING_OUTPUT_ROOT means a published checkpoint that does not
+    describe this run is replaced by a locally trained one instead of failing
+    on a read-only filesystem.
+    """
+
+    raw = os.environ.get("PROMPT_TRAINING_SEARCH_ROOTS", "")
+    roots = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        root = Path(entry).expanduser()
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
 def _load_payload(path: Path) -> Mapping[str, Any]:
     try:
         payload = torch.load(path, map_location="cpu", weights_only=True)
@@ -270,20 +292,27 @@ def ensure(dataset: str) -> Path:
         "seed": seed,
         "epochs": epochs,
     }
+    # Training writes here and nowhere else, because the published prompts are
+    # mounted read-only. A published checkpoint that does not describe this run
+    # is therefore replaced by a locally trained one rather than in place.
     derived = checkpoint_path(
         output_root, split_protocol, attack_train_fraction, dataset, epochs
     )
 
-    # An explicitly configured path wins when it describes this run; the
-    # derived location is both the fallback and where training writes.
+    # An explicitly configured path wins when it describes this run, then the
+    # search roots in order, then whatever earlier training already produced.
     explicit = os.environ.get(f"LEARNABLE_PROMPT_{dataset.upper()}_CHECKPOINT", "").strip()
     if explicit.startswith(PLACEHOLDER_PREFIX):
         explicit = ""
     candidates = []
     if explicit:
         candidates.append(Path(explicit).expanduser().resolve())
-    if derived not in candidates:
-        candidates.append(derived)
+    for root in [*search_roots(), output_root]:
+        candidate = checkpoint_path(
+            root, split_protocol, attack_train_fraction, dataset, epochs
+        )
+        if candidate not in candidates:
+            candidates.append(candidate)
 
     for candidate in candidates:
         if not candidate.is_file():

@@ -120,17 +120,32 @@ raises on that by itself.
 So the launcher resolves the checkpoint rather than trusting a configured path.
 Before each learnable setup it looks for one matching this run's dataset, split
 protocol, attack-train fraction, split seed and epoch count, and runs
-`object-agnostic-prompt-training` when there is none:
+`object-agnostic-prompt-training` when there is none. Every tree is laid out
+the same way:
 
 ```
-PROMPT_TRAINING_OUTPUT_ROOT/<protocol>[_trainNN]/<dataset>/prompts_epoch<N>.pt
+<root>/<protocol>[_trainNN]/<dataset>/prompts_epoch<N>.pt
 ```
 
 The directory carries the same suffix the setup ID does, so `balanced` and
 `full` never overwrite each other and a fraction sweep files each cohort
-separately. Training receives this run's own `attack_train_indices.csv` as its
-manifest, so the prompts are fitted on the images the perturbation is optimized
-on by construction; the training pipeline additionally asserts the split seed,
+separately.
+
+Roots are searched in order: `PROMPT_TRAINING_SEARCH_ROOTS` first, then
+`PROMPT_TRAINING_OUTPUT_ROOT`. The search roots hold published prompts and are
+read-only; the output root is the only place training ever writes. That split
+matters on Kaggle, where the published dataset is mounted read-only, so a
+published checkpoint that does not describe this run is replaced by a locally
+trained one rather than failing on a read-only filesystem. The default search
+root is the dataset holding the `balanced` and `full` cohorts:
+
+```
+PROMPT_TRAINING_SEARCH_ROOTS=/kaggle/input/learned-prompts/prompts
+```
+
+Training receives this run's own `attack_train_indices.csv` as its manifest, so
+the prompts are fitted on the images the perturbation is optimized on by
+construction; the training pipeline additionally asserts the split seed,
 evaluation fraction and label policy stamped on those rows against its own
 configuration and refuses to run when they disagree.
 

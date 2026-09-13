@@ -53,10 +53,18 @@ export PROMPT_SETUP=learnable
 ```
 
 No checkpoint path is required. The launcher looks for prompts matching this
-run's split protocol, attack-train fraction, split seed and epoch count under
-`PROMPT_TRAINING_OUTPUT_ROOT`, and trains them with
-`object-agnostic-prompt-training` when there are none. Training happens once per
-cohort and is reused by every later setup sharing it.
+run's split protocol, attack-train fraction, split seed and epoch count, and
+trains them with `object-agnostic-prompt-training` when there are none.
+Training happens once per cohort and is reused by every later setup sharing it.
+
+On Kaggle, attach
+[`parsaorbot/learned-prompts`](https://www.kaggle.com/datasets/parsaorbot/learned-prompts)
+and the published `balanced` and `full` cohorts are found automatically at the
+default `PROMPT_TRAINING_SEARCH_ROOTS=/kaggle/input/learned-prompts/prompts`.
+That mount is read-only, so anything needing different prompts, a fraction
+below 1.00 for instance, is trained into `PROMPT_TRAINING_OUTPUT_ROOT` instead.
+Point `PROMPT_TRAINING_SEARCH_ROOTS` elsewhere, or set it empty, to ignore the
+published prompts entirely.
 
 Set `LEARNABLE_PROMPT_MVTEC_CHECKPOINT` or `LEARNABLE_PROMPT_VISA_CHECKPOINT` to
 prefer a specific checkpoint. It is used only if it describes this run's split,

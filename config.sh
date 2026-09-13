@@ -125,6 +125,13 @@ LEARNABLE_PROMPT_VISA_CHECKPOINT="${LEARNABLE_PROMPT_VISA_CHECKPOINT:-}"
 
 # Checkpoints are filed by cohort, so balanced and full never overwrite each
 # other: <root>/<protocol>[_trainNN]/<dataset>/prompts_epoch<N>.pt
+#
+# Published prompts are searched first, in order, and are read-only. The
+# default is the Kaggle dataset holding the balanced and full cohorts:
+#   kaggle.com/datasets/parsaorbot/learned-prompts
+# Anything that does not describe the current run is retrained into
+# PROMPT_TRAINING_OUTPUT_ROOT instead, which is the only place written.
+PROMPT_TRAINING_SEARCH_ROOTS="${PROMPT_TRAINING_SEARCH_ROOTS:-/kaggle/input/learned-prompts/prompts}"
 PROMPT_TRAINING_OUTPUT_ROOT="${PROMPT_TRAINING_OUTPUT_ROOT:-$OUTPUT_BASE/prompts}"
 # Point PROMPT_TRAINING_ROOT at a local clone to skip the fetch entirely.
 PROMPT_TRAINING_ROOT="${PROMPT_TRAINING_ROOT:-}"
