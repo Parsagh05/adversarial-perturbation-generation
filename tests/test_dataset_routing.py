@@ -108,3 +108,49 @@ class CompleteSourceLeakageCheckTests(unittest.TestCase):
             }
 
         self.assertEqual(ids("mvtec") & ids("visa"), set())
+
+
+class FullProtocolGuardTests(unittest.TestCase):
+    """Guards must know about the cases `full` deliberately creates.
+
+    Three guards written for `balanced` have already rejected sound `full`
+    output. Each of these is the same shape: the generator does something on
+    purpose under `full` and a later check calls it leakage.
+    """
+
+    def test_per_image_allows_attacking_the_attack_train_half_under_full(self) -> None:
+        script = (ROOT / "run_per_image.py").read_text(encoding="utf-8")
+        self.assertIn('ATTACK_EVERY_IMAGE = SPLIT_PROTOCOL == "full"', script)
+        # Selection and verification must agree, or full aborts after the work.
+        self.assertIn(
+            "if not ATTACK_EVERY_IMAGE and set(sample_ids) & attack_train_ids:",
+            script,
+        )
+        self.assertNotIn(
+            "    if set(sample_ids) & attack_train_ids:\n", script
+        )
+
+    def test_per_image_compares_against_attack_train_only_when_gated(self) -> None:
+        script = (ROOT / "run_per_image.py").read_text(encoding="utf-8")
+        collapsed = " ".join(script.split())
+        # Two comparisons against the attack_train ids, both gated.
+        self.assertEqual(collapsed.count("& attack_train_ids"), 1)
+        self.assertEqual(collapsed.count("in attack_train_ids"), 1)
+        self.assertIn(
+            "if not ATTACK_EVERY_IMAGE and set(sample_ids) & attack_train_ids:",
+            collapsed,
+        )
+        self.assertIn(
+            "if not ATTACK_EVERY_IMAGE and any( s.protocol_id in attack_train_ids",
+            collapsed,
+        )
+
+    def test_per_category_stays_on_the_attack_train_partition(self) -> None:
+        # per_category has no full-specific cohort, so its leakage check needs
+        # no gate: it only ever trains on attack_train samples.
+        script = (ROOT / "run_per_category.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'raise RuntimeError("Evaluation image entered category optimization")',
+            script,
+        )
+        self.assertIn('if set(row["attack_train_sample_ids"]) & evaluation_ids:', script)

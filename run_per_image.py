@@ -577,7 +577,11 @@ for row in artifact_rows:
         raise RuntimeError(f"Alignment mismatch in {artifact}")
     if sample_ids != list(row["evaluation_sample_ids"]):
         raise RuntimeError(f"Stored sample ID order mismatch in {artifact}")
-    if set(sample_ids) & attack_train_ids:
+    # Under "full" per-image deliberately covers every test image, the
+    # attack_train half included, because each delta fits the single image it
+    # attacks and so has nothing to hold out. The selection above is gated on
+    # ATTACK_EVERY_IMAGE for that reason; this check has to agree with it.
+    if not ATTACK_EVERY_IMAGE and set(sample_ids) & attack_train_ids:
         raise RuntimeError(f"Attack-train leakage in per-image artifact {artifact}")
     relative_noise = artifact.relative_to(OUTPUT_ROOT)
     noise_paths.append(artifact)
