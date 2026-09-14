@@ -266,10 +266,25 @@ def audit_scope(
                 f"Expected directions {sorted(EXPECTED_DIRECTIONS)}, found "
                 f"{sorted(found_directions)} in {manifest_path}"
             )
-        if scope != "per_image" and by_direction.attack_train_image_count.nunique() != 1:
-            raise RuntimeError(f"Direction train counts differ in {manifest_path}")
-        if by_direction.evaluation_attacked_image_count.nunique() != 1:
-            raise RuntimeError(f"Direction evaluation counts differ in {manifest_path}")
+        # The two directions attack opposite labels: normal_to_abnormal fits
+        # normal images, abnormal_to_normal fits abnormal ones. Only balanced
+        # downsamples a category to equal label counts, so only there do the
+        # two directions see the same number of images. Under full the counts
+        # differ by the category's natural class ratio, by construction.
+        # audit_protocol checks the label structure itself for both protocols.
+        if SPLIT_PROTOCOL == "balanced":
+            if scope != "per_image" and by_direction.attack_train_image_count.nunique() != 1:
+                raise RuntimeError(
+                    f"Direction train counts differ under balanced in "
+                    f"{manifest_path}: "
+                    f"{by_direction.attack_train_image_count.to_dict()}"
+                )
+            if by_direction.evaluation_attacked_image_count.nunique() != 1:
+                raise RuntimeError(
+                    f"Direction evaluation counts differ under balanced in "
+                    f"{manifest_path}: "
+                    f"{by_direction.evaluation_attacked_image_count.to_dict()}"
+                )
         if scope == "per_image" and set(by_direction.attack_train_image_count) != {0}:
             raise RuntimeError(f"Per-image attacks must use zero train images: {manifest_path}")
     return set(manifest.protocol_split_sha256.astype(str))

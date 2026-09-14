@@ -203,3 +203,45 @@ class SplitProtocolGroupingTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SPLIT_PROTOCOL": "nope"}):
             with self.assertRaises(ValueError):
                 common.split_protocol()
+
+
+class AuditProtocolAssumptionTests(unittest.TestCase):
+    """The audit must not assume equal label counts outside ``balanced``.
+
+    Only balanced downsamples a category to equal label counts. The two attack
+    directions fit opposite labels, so under full they legitimately train on
+    different numbers of images and any equal-count assertion rejects a sound
+    run. This has now happened twice, so the gate is pinned here.
+    """
+
+    def _audit_source(self) -> str:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        return (root / "audit_generation.py").read_text(encoding="utf-8")
+
+    def test_direction_count_checks_are_gated_on_balanced(self) -> None:
+        source = self._audit_source()
+        guard = source.index('if SPLIT_PROTOCOL == "balanced":\n            if scope')
+        train_check = source.index("attack_train_image_count.nunique() != 1")
+        evaluation_check = source.index(
+            "evaluation_attacked_image_count.nunique() != 1"
+        )
+        self.assertLess(guard, train_check)
+        self.assertLess(guard, evaluation_check)
+
+    def test_no_ungated_equal_count_assertion_is_added(self) -> None:
+        # Every nunique() comparison in the audit is an equal-count claim, so
+        # each one needs a protocol gate. Adding another should fail here
+        # rather than after a full generation pass.
+        source = self._audit_source()
+        self.assertEqual(source.count(".nunique()"), 2)
+
+    def test_the_protocol_audit_only_demands_balance_for_balanced(self) -> None:
+        source = self._audit_source()
+        self.assertIn(
+            'if SPLIT_PROTOCOL == "balanced" and not counts[0].eq(counts[1]).all():',
+            source,
+        )
+        # Both labels must be present under either protocol.
+        self.assertIn("A protocol stratum is missing a label", source)
