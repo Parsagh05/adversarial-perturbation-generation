@@ -139,6 +139,7 @@ class BalancedProtocolTests(unittest.TestCase):
             protocol = Path(temporary) / "protocol"
             train_csv = protocol / "attack_train_indices.csv"
             evaluation_csv = protocol / "evaluation_test_indices.csv"
+            complete_csv = protocol / "complete_retained_indices.csv"
             environment = {
                 "SOURCE_DATASETS": "mvtec",
                 "EVALUATION_DATASETS": "mvtec,visa",
@@ -150,6 +151,7 @@ class BalancedProtocolTests(unittest.TestCase):
                 mock.patch.object(common, "PROTOCOL_DIR", protocol),
                 mock.patch.object(common, "ATTACK_TRAIN_CSV", train_csv),
                 mock.patch.object(common, "EVALUATION_CSV", evaluation_csv),
+                mock.patch.object(common, "COMPLETE_RETAINED_CSV", complete_csv),
                 mock.patch.object(
                     dataset_module, "discover_anomaly_datasets", return_value=samples
                 ),
@@ -158,8 +160,15 @@ class BalancedProtocolTests(unittest.TestCase):
 
             train = pd.read_csv(train_csv)
             evaluation = pd.read_csv(evaluation_csv)
+            complete = pd.read_csv(complete_csv)
             self.assertEqual(set(train.dataset), {"mvtec"})
             self.assertEqual(set(evaluation.dataset), {"mvtec", "visa"})
+            self.assertEqual(set(complete.dataset), {"mvtec", "visa"})
+            self.assertEqual(
+                set(complete.partition), {"attack_train", "evaluation"}
+            )
+            visa_complete = complete[complete.dataset.eq("visa")]
+            self.assertGreater(len(visa_complete), len(evaluation[evaluation.dataset.eq("visa")]))
             self.assertFalse(set(train.protocol_id) & set(evaluation.protocol_id))
 
 

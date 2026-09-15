@@ -56,6 +56,7 @@ from adversarial_harness.prompts import (
     learnable_prompt_checkpoint,
 )
 from common import (
+    COMPLETE_RETAINED_CSV,
     LABEL_BALANCE_POLICY,
     split_protocol,
     assert_partition_disjoint,
@@ -668,13 +669,14 @@ pd.DataFrame([
     for row in artifact_rows
 ]).to_csv(diagnostics_path, index=False)
 
-for protocol_path in (ATTACK_TRAIN_CSV, EVALUATION_CSV):
+for protocol_path in (ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV):
     shutil.copy2(protocol_path, OUTPUT_ROOT / protocol_path.name)
 for required_path in (
     attack_manifest_path,
     diagnostics_path,
     OUTPUT_ROOT / "attack_train_indices.csv",
     OUTPUT_ROOT / "evaluation_test_indices.csv",
+    OUTPUT_ROOT / "complete_retained_indices.csv",
 ):
     if not required_path.is_file():
         raise FileNotFoundError(f"Incomplete directory bundle: {required_path}")
@@ -692,7 +694,7 @@ archive_path = OUTPUT_BASE / (
 if archive_path.exists():
     archive_path.unlink()
 with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
-    for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV):
+    for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV):
         archive.write(path, path.name, compress_type=zipfile.ZIP_DEFLATED)
     archive.write(attack_manifest_path, "attack_manifest.csv", compress_type=zipfile.ZIP_DEFLATED)
     archive.write(diagnostics_path, "optimization_diagnostics.csv", compress_type=zipfile.ZIP_DEFLATED)
@@ -708,6 +710,7 @@ with zipfile.ZipFile(archive_path, "r") as archive:
 expected_archive_names = {
     "attack_train_indices.csv",
     "evaluation_test_indices.csv",
+    "complete_retained_indices.csv",
     "attack_manifest.csv",
     "optimization_diagnostics.csv",
     *(str(row["noise_file"]).replace("\\", "/") for row in manifest_rows),

@@ -234,6 +234,8 @@ The protocol is recorded so an evaluator can detect it:
 - the setup ID contains `_fullcross` or `_halfcross`; `full` retains its
   existing `_full` protocol component while `balanced` adds no protocol component
 - `label_balance_policy` on every protocol CSV row
+- `complete_retained_indices.csv`, containing both deterministic partitions
+  for every source or evaluation dataset, including evaluation-only targets
 - `split_protocol` on every manifest and diagnostics row, plus `training_source`
   on per-dataset rows (`attack_train_partition` or `complete_source_dataset`)
 - `full_data_cross`, `cross_data_mode`, `source_partition_policy`, and
@@ -445,6 +447,16 @@ OUTPUT_BASE/setups/
 
 Each setup directory contains its own protocol CSVs, logs, uncompressed
 bundles, and archives:
+
+```text
+protocol/
+├── attack_train_indices.csv
+├── evaluation_test_indices.csv
+└── complete_retained_indices.csv
+```
+
+The complete file is authoritative for `fullcross`; `halfcross` continues to
+use the two role-specific files.
 
 - `canonical_clip_per_dataset/`
 - `canonical_clip_cross_dataset/`

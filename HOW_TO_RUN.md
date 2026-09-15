@@ -136,6 +136,11 @@ retained halves and `_halfcross` uses source `attack_train` plus target
 `..._full_fullcross` and `..._full_halfcross` are distinct. The per-dataset
 cohort is unchanged.
 
+Every protocol and scope bundle includes `complete_retained_indices.csv`.
+Fullcross evaluators select the target dataset and attacked label from this
+file, which stays complete even when the target is absent from
+`SOURCE_DATASETS`. Halfcross continues to use `evaluation_test_indices.csv`.
+
 The default setup IDs are `ep7p14_cat100_img100_eps2` and `ep7p14_cat100_img100_eps4`, both using the
 default `margin_topk` loss. The alternate `ce_focal_dice` loss adds two more,
 formed by appending `_ce_focal_dice` to each. Every one of those four

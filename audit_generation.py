@@ -113,10 +113,28 @@ def audit_protocol(setup_root: Path) -> None:
     protocol = setup_root / "protocol"
     train = pd.read_csv(protocol / "attack_train_indices.csv")
     evaluation = pd.read_csv(protocol / "evaluation_test_indices.csv")
+    complete = pd.read_csv(protocol / "complete_retained_indices.csv")
     if set(train.protocol_id) & set(evaluation.protocol_id):
         raise RuntimeError(f"Train/evaluation leakage in {setup_root.name}")
-    frame = pd.concat([train, evaluation], ignore_index=True)
-    counts = frame.groupby(
+    if complete.protocol_id.duplicated().any():
+        raise RuntimeError(f"Duplicate complete-cohort IDs in {setup_root.name}")
+    if set(complete.partition.astype(str)) != {"attack_train", "evaluation"}:
+        raise RuntimeError(f"Incomplete retained cohort in {setup_root.name}")
+    expected_train = complete[
+        complete.dataset.astype(str).isin(set(train.dataset.astype(str)))
+        & complete.partition.astype(str).eq("attack_train")
+    ]
+    expected_evaluation = complete[
+        complete.dataset.astype(str).isin(set(evaluation.dataset.astype(str)))
+        & complete.partition.astype(str).eq("evaluation")
+    ]
+    if set(train.protocol_id.astype(str)) != set(expected_train.protocol_id.astype(str)):
+        raise RuntimeError(f"Attack-train CSV disagrees with complete cohort")
+    if set(evaluation.protocol_id.astype(str)) != set(
+        expected_evaluation.protocol_id.astype(str)
+    ):
+        raise RuntimeError(f"Evaluation CSV disagrees with complete cohort")
+    counts = complete.groupby(
         ["dataset", "category", "partition", "label"]
     ).size().unstack(fill_value=0)
     if set(counts.columns) != {0, 1} or (counts[[0, 1]] == 0).any().any():
@@ -181,23 +199,10 @@ def audit_dataset_cohort_routing(
     if set(manifest.source_target_id_overlap_count.astype(int)) != {0}:
         raise RuntimeError(f"Cross-dataset source/target leakage in {manifest_path}")
 
-    train = pd.read_csv(setup_root / "protocol" / "attack_train_indices.csv")
-    evaluation = pd.read_csv(setup_root / "protocol" / "evaluation_test_indices.csv")
-    train = train.assign(_audit_partition="attack_train")
-    evaluation = evaluation.assign(_audit_partition="evaluation")
-    protocol = pd.concat([train, evaluation], ignore_index=True)
-
-    def complete_label_count(dataset: str, label: int) -> int:
-        size_column = (
-            "balanced_label_stratum_size"
-            if SPLIT_PROTOCOL == "balanced"
-            else "original_label_stratum_size"
-        )
-        strata = protocol[
-            (protocol.dataset.astype(str) == dataset)
-            & (protocol.label.astype(int) == label)
-        ][["category", size_column]].drop_duplicates()
-        return int(strata[size_column].astype(int).sum())
+    protocol = pd.read_csv(
+        setup_root / "protocol" / "complete_retained_indices.csv",
+        dtype={"protocol_id": str},
+    )
 
     for row in manifest.itertuples(index=False):
         source = protocol[
@@ -207,10 +212,10 @@ def audit_dataset_cohort_routing(
         target = protocol[
             (protocol.dataset.astype(str) == str(row.target_dataset))
             & (protocol.label.astype(int) == int(row.source_label))
-            & protocol["_audit_partition"].isin(expected_target_partitions)
+            & protocol.partition.astype(str).isin(expected_target_partitions)
         ]
         if expected_source_policy != "all":
-            source = source[source["_audit_partition"] == "attack_train"]
+            source = source[source.partition.astype(str) == "attack_train"]
             fraction = float(row.attack_train_fraction)
             source = source[
                 source.attack_train_rank.astype(int)
@@ -223,12 +228,9 @@ def audit_dataset_cohort_routing(
             ]
             expected_source_count = len(source)
         else:
-            expected_source_count = complete_label_count(
-                str(row.source_dataset), int(row.source_label)
-            )
+            expected_source_count = len(source)
         expected_target_count = (
-            complete_label_count(str(row.target_dataset), int(row.source_label))
-            if expected_target_policy == "all" else len(target)
+            len(target)
         )
         if expected_source_count != int(row.attack_train_image_count):
             raise RuntimeError(
@@ -263,6 +265,7 @@ def audit_scope(
         diagnostics_path,
         bundle / "attack_train_indices.csv",
         bundle / "evaluation_test_indices.csv",
+        bundle / "complete_retained_indices.csv",
     ):
         if not required.is_file():
             raise FileNotFoundError(f"Incomplete {scope} bundle: {required}")

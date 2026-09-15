@@ -25,6 +25,7 @@ OUTPUT_BASE = Path(os.environ["OUTPUT_BASE"]).expanduser().resolve()
 PROTOCOL_DIR = OUTPUT_BASE / "protocol"
 ATTACK_TRAIN_CSV = PROTOCOL_DIR / "attack_train_indices.csv"
 EVALUATION_CSV = PROTOCOL_DIR / "evaluation_test_indices.csv"
+COMPLETE_RETAINED_CSV = PROTOCOL_DIR / "complete_retained_indices.csv"
 # balanced: downsample each category to min(normal, abnormal) so both labels
 #   have equal counts, discarding the surplus. The historical protocol.
 # full: keep every image and split each label by the same fraction, so the
@@ -145,7 +146,7 @@ def sha256_file(path: Path) -> str:
 
 def split_sha256() -> str:
     digest = hashlib.sha256()
-    for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV):
+    for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV):
         digest.update(path.read_bytes())
     return digest.hexdigest()
 
@@ -297,6 +298,27 @@ def load_protocol() -> tuple[pd.DataFrame, pd.DataFrame]:
     return train, evaluation
 
 
+def load_complete_retained_protocol() -> pd.DataFrame:
+    """Load the self-contained cohort used by fullcross generation/evaluation."""
+
+    if not COMPLETE_RETAINED_CSV.is_file():
+        raise FileNotFoundError(COMPLETE_RETAINED_CSV)
+    frame = pd.read_csv(COMPLETE_RETAINED_CSV, dtype={"protocol_id": str})
+    missing = REQUIRED_COLUMNS - set(frame.columns)
+    if missing:
+        raise RuntimeError(
+            f"{COMPLETE_RETAINED_CSV.name} is missing columns: {sorted(missing)}"
+        )
+    if frame.protocol_id.duplicated().any():
+        raise RuntimeError(f"Duplicate protocol_id values in {COMPLETE_RETAINED_CSV}")
+    if set(frame.partition.astype(str)) != {"attack_train", "evaluation"}:
+        raise RuntimeError(
+            f"{COMPLETE_RETAINED_CSV.name} must contain both protocol partitions"
+        )
+    _assert_protocol_label_balance(frame)
+    return frame
+
+
 def prepare_protocol_split() -> None:
     """Create an immutable category- and label-balanced 50/50-style split."""
     from adversarial_harness.dataset import discover_anomaly_datasets
@@ -311,8 +333,17 @@ def prepare_protocol_split() -> None:
         raise ValueError("EVALUATION_FRACTION must be between 0 and 1")
 
     PROTOCOL_DIR.mkdir(parents=True, exist_ok=True)
-    if ATTACK_TRAIN_CSV.is_file() and EVALUATION_CSV.is_file():
+    protocol_paths = (ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV)
+    existing_protocol_paths = [path for path in protocol_paths if path.is_file()]
+    if existing_protocol_paths and len(existing_protocol_paths) != len(protocol_paths):
+        raise RuntimeError(
+            "Incomplete protocol files. Use a new OUTPUT_BASE or remove the protocol "
+            "directory before rebuilding: "
+            + ", ".join(path.name for path in existing_protocol_paths)
+        )
+    if len(existing_protocol_paths) == len(protocol_paths):
         train, evaluation = load_protocol()
+        complete = load_complete_retained_protocol()
         stored_datasets = set(pd.concat([train, evaluation]).dataset.astype(str))
         if stored_datasets != set(datasets):
             raise RuntimeError(
@@ -329,6 +360,26 @@ def prepare_protocol_split() -> None:
                 "Existing evaluation_test_indices.csv does not match "
                 "EVALUATION_DATASETS"
             )
+        if set(complete.dataset.astype(str)) != set(datasets):
+            raise RuntimeError(
+                "Existing complete_retained_indices.csv does not match protocol datasets"
+            )
+        expected_train_ids = set(
+            complete[
+                complete.dataset.astype(str).isin(source_datasets())
+                & complete.partition.astype(str).eq("attack_train")
+            ].protocol_id
+        )
+        expected_evaluation_ids = set(
+            complete[
+                complete.dataset.astype(str).isin(evaluation_datasets())
+                & complete.partition.astype(str).eq("evaluation")
+            ].protocol_id
+        )
+        if set(train.protocol_id) != expected_train_ids:
+            raise RuntimeError("attack_train_indices.csv disagrees with complete cohort")
+        if set(evaluation.protocol_id) != expected_evaluation_ids:
+            raise RuntimeError("evaluation_test_indices.csv disagrees with complete cohort")
         stored_policy = set(pd.concat([train, evaluation]).label_balance_policy.astype(str))
         if stored_policy != {policy}:
             raise RuntimeError(
@@ -342,7 +393,10 @@ def prepare_protocol_split() -> None:
                 "Existing protocol CSVs use different split settings. Delete OUTPUT_BASE/protocol "
                 "before intentionally rebuilding the benchmark split."
             )
-        print(f"[reuse split] train={len(train)} evaluation={len(evaluation)} overlap=0")
+        print(
+            f"[reuse split] train={len(train)} evaluation={len(evaluation)} "
+            f"complete={len(complete)} overlap=0"
+        )
         return
 
     samples = discover_anomaly_datasets(
@@ -358,20 +412,18 @@ def prepare_protocol_split() -> None:
 
     groups, original_sizes = _balanced_category_groups(samples, split_seed, protocol)
 
-    rows = []
+    complete_rows = []
     for (dataset, category, label), group in sorted(groups.items()):
         n_eval = min(max(int(round(len(group) * evaluation_fraction)), 1), len(group) - 1)
         evaluation_samples = group[:n_eval]
         train_samples = group[n_eval:]
 
-        selected_partitions = []
-        if dataset in source_datasets():
-            selected_partitions.append(("attack_train", train_samples))
-        if dataset in evaluation_datasets():
-            selected_partitions.append(("evaluation", evaluation_samples))
-        for partition, subset in selected_partitions:
+        for partition, subset in (
+            ("attack_train", train_samples),
+            ("evaluation", evaluation_samples),
+        ):
             for rank, sample in enumerate(subset, start=1):
-                rows.append({
+                complete_rows.append({
                     "protocol_id": sample.protocol_id,
                     "dataset": sample.dataset,
                     "category": sample.category,
@@ -393,18 +445,25 @@ def prepare_protocol_split() -> None:
                     "balanced_label_stratum_size": len(group),
                 })
 
-    frame = pd.DataFrame(rows).sort_values(
+    complete = pd.DataFrame(complete_rows).sort_values(
         ["dataset", "partition", "category", "label", "protocol_id"]
     ).reset_index(drop=True)
-    train = frame[frame.partition.eq("attack_train")].reset_index(drop=True)
-    evaluation = frame[frame.partition.eq("evaluation")].reset_index(drop=True)
+    train = complete[
+        complete.partition.eq("attack_train")
+        & complete.dataset.isin(source_datasets())
+    ].reset_index(drop=True)
+    evaluation = complete[
+        complete.partition.eq("evaluation")
+        & complete.dataset.isin(evaluation_datasets())
+    ].reset_index(drop=True)
     overlap = set(train.protocol_id) & set(evaluation.protocol_id)
     if overlap:
         raise RuntimeError("Generated train/evaluation split overlaps")
-    _assert_protocol_label_balance(frame)
+    _assert_protocol_label_balance(complete)
 
     train.to_csv(ATTACK_TRAIN_CSV, index=False)
     evaluation.to_csv(EVALUATION_CSV, index=False)
+    complete.to_csv(COMPLETE_RETAINED_CSV, index=False)
     label_counts = {
         partition: subset.groupby("label").size().to_dict()
         for partition, subset in (("train", train), ("evaluation", evaluation))
@@ -413,11 +472,13 @@ def prepare_protocol_split() -> None:
     available = sum(original_sizes.values())
     print(
         f"[created split] protocol={protocol} policy={policy} "
-        f"train={len(train)} evaluation={len(evaluation)} labels={label_counts} "
+        f"train={len(train)} evaluation={len(evaluation)} complete={len(complete)} "
+        f"labels={label_counts} "
         f"overlap=0 kept={kept}/{available} images"
     )
     print("Train CSV:", ATTACK_TRAIN_CSV)
     print("Evaluation CSV:", EVALUATION_CSV)
+    print("Complete retained CSV:", COMPLETE_RETAINED_CSV)
 
 
 def bind_discovered_samples(discovered_samples: Sequence):
@@ -442,6 +503,19 @@ def bind_discovered_samples_from_partition_csvs(
     discovered_samples: Sequence, _attack_train_csv: Path, _evaluation_csv: Path
 ):
     return bind_discovered_samples(discovered_samples)
+
+
+def bind_complete_retained_samples(discovered_samples: Sequence):
+    """Bind exact fullcross samples from the packaged complete cohort CSV."""
+
+    frame = load_complete_retained_protocol().sort_values(
+        ["dataset", "partition", "category", "label", "protocol_id"]
+    ).reset_index(drop=True)
+    by_id = {sample.protocol_id: sample for sample in discovered_samples}
+    missing = sorted(set(frame.protocol_id) - set(by_id))
+    if missing:
+        raise RuntimeError(f"Complete cohort images missing under roots: {missing[:5]}")
+    return [by_id[protocol_id] for protocol_id in frame.protocol_id], frame
 
 
 def assert_partition_disjoint(assignments: Mapping[str, str]) -> None:

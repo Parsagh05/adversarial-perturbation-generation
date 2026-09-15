@@ -58,16 +58,17 @@ from adversarial_harness.prompts import (
     learnable_prompt_checkpoint,
 )
 from common import (
+    COMPLETE_RETAINED_CSV,
     LABEL_BALANCE_POLICY,
     split_protocol,
     assert_partition_disjoint,
     bind_discovered_samples_from_partition_csvs,
+    bind_complete_retained_samples,
     fraction_tag,
     evaluation_datasets,
     parse_fraction_list,
     parse_numeric,
     protocol_datasets,
-    retained_protocol_samples,
     select_attack_train_fraction,
     sha256_file,
     source_datasets,
@@ -202,7 +203,9 @@ all_discovered = discover_anomaly_datasets(
     max_samples_per_category=None,
     train_normal=False,
 )
-complete_protocol_samples = retained_protocol_samples(all_discovered)
+complete_protocol_samples, complete_protocol_frame = bind_complete_retained_samples(
+    all_discovered
+)
 samples, assignments, rank_info, protocol_frame = bind_discovered_samples_from_partition_csvs(
     all_discovered, ATTACK_TRAIN_CSV, EVALUATION_CSV
 )
@@ -532,6 +535,7 @@ for source_dataset in SOURCE_DATASETS:
                             "delta_sha256_float32": sha256_tensor(delta),
                             "protocol_attack_train_csv": str(ATTACK_TRAIN_CSV),
                             "protocol_evaluation_csv": str(EVALUATION_CSV),
+                            "protocol_complete_retained_csv": str(COMPLETE_RETAINED_CSV),
                             "notes": (
                                 "One source-dataset universal delta, optimized exactly once on "
                                 + (
@@ -648,7 +652,7 @@ for row in artifact_rows:
             "protocol_split_sha256": protocol_sha,
             "label_balance_policy": row["label_balance_policy"],
             "evaluation_ids_source": (
-                "complete_retained_protocol_cohort"
+                "complete_retained_indices.csv"
                 if deliver_whole_target else "evaluation_test_indices.csv"
             ),
             "apply_only_to_clean_label": row["source_label"],
@@ -740,13 +744,16 @@ for setting in TRANSFER_SETTINGS:
         diagnostics_path, index=False
     )
 
-    for protocol_path in (ATTACK_TRAIN_CSV, EVALUATION_CSV):
+    for protocol_path in (
+        ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV
+    ):
         shutil.copy2(protocol_path, bundle / protocol_path.name)
     for required_path in (
         attack_manifest_path,
         diagnostics_path,
         bundle / "attack_train_indices.csv",
         bundle / "evaluation_test_indices.csv",
+        bundle / "complete_retained_indices.csv",
     ):
         if not required_path.is_file():
             raise FileNotFoundError(f"Incomplete directory bundle: {required_path}")
@@ -766,7 +773,7 @@ for setting in TRANSFER_SETTINGS:
     if archive_path.exists():
         archive_path.unlink()
     with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
-        for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV):
+        for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV):
             archive.write(path, path.name, compress_type=zipfile.ZIP_DEFLATED)
         archive.write(
             attack_manifest_path, "attack_manifest.csv", compress_type=zipfile.ZIP_DEFLATED
@@ -786,6 +793,7 @@ for setting in TRANSFER_SETTINGS:
     expected_archive_names = {
         "attack_train_indices.csv",
         "evaluation_test_indices.csv",
+        "complete_retained_indices.csv",
         "attack_manifest.csv",
         "optimization_diagnostics.csv",
         *(Path(str(row["noise_file"])).as_posix() for row in rows),

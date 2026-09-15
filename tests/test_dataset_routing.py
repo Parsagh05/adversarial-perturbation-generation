@@ -43,14 +43,13 @@ class DatasetRoutingContractTests(unittest.TestCase):
 
     def test_protocol_writes_only_source_train_and_selected_evaluation_rows(self) -> None:
         common = (ROOT / "common.py").read_text(encoding="utf-8")
-        self.assertIn("if dataset in source_datasets():", common)
         self.assertIn(
-            'selected_partitions.append(("attack_train", train_samples))', common
+            'complete.dataset.isin(source_datasets())', common
         )
-        self.assertIn("if dataset in evaluation_datasets():", common)
         self.assertIn(
-            'selected_partitions.append(("evaluation", evaluation_samples))', common
+            'complete.dataset.isin(evaluation_datasets())', common
         )
+        self.assertIn('COMPLETE_RETAINED_CSV = PROTOCOL_DIR / "complete_retained_indices.csv"', common)
 
 
 if __name__ == "__main__":
@@ -105,7 +104,18 @@ class CompleteSourceLeakageCheckTests(unittest.TestCase):
             "complete_protocol_samples if deliver_whole_target else samples",
             script,
         )
-        self.assertIn('"complete_retained_protocol_cohort"', script)
+        self.assertIn('"complete_retained_indices.csv"', script)
+
+    def test_every_bundle_packages_the_complete_retained_cohort(self) -> None:
+        for filename in (
+            "run_per_dataset.py",
+            "run_per_category.py",
+            "run_per_image.py",
+        ):
+            script = (ROOT / filename).read_text(encoding="utf-8")
+            with self.subTest(filename=filename):
+                self.assertIn("COMPLETE_RETAINED_CSV", script)
+                self.assertIn('"complete_retained_indices.csv"', script)
 
     def test_check_runs_after_the_delivered_set_is_known(self) -> None:
         script = (ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
