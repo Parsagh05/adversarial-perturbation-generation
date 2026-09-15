@@ -12,8 +12,9 @@ OUTPUT_BASE="${OUTPUT_BASE:-/ABSOLUTE/PATH/TO/canonical_clip_outputs}"
 # Each SETUP_EPOCHS entry is one dataset:category:image triple, because the
 # scopes solve different problems: a per-dataset delta must satisfy hundreds
 # of images at once, a per-category delta about a dozen, a per-image delta
-# exactly one. cross_dataset takes no value: it delivers the per-dataset
-# delta. A bare number means all three scopes use it.
+# exactly one. cross_dataset takes no value: halfcross delivers the per-dataset
+# delta and fullcross uses its epoch budget for a complete-cohort delta. A bare
+# number means all three scopes use it.
 # An epoch is one pass over whatever that delta trains on; the runner derives
 # the PGD step count as ceil(epochs * ceil(n_images / batch)). Budgets therefore
 # stay constant when the training set changes size, as it does between
@@ -41,10 +42,14 @@ ANOMALYCLIP_COMMIT="${ANOMALYCLIP_COMMIT:-3911738c0867544f545a076ad78f3f11d9ecbf
 #   the surplus, then split. Equal label counts; the historical protocol.
 # full: keep every image and split each label by EVALUATION_FRACTION, so the
 #   category's natural class ratio survives and nothing is discarded.
-#   Cross-dataset additionally trains on the complete source dataset and is
-#   delivered to the complete other dataset, and per-image covers every test
-#   image rather than only the held-out half.
+#   FULL_DATA_CROSS independently selects the cross-dataset cohorts, while
+#   per-image covers every test image rather than only the held-out half.
 SPLIT_PROTOCOL="${SPLIT_PROTOCOL:-balanced}"
+# Cross-dataset cohort policy under either split protocol. true trains on both
+# retained source halves and attacks both retained target halves. false reuses
+# the ordinary per-dataset delta (source attack_train -> target evaluation).
+# It does not alter the per-dataset scope.
+FULL_DATA_CROSS="${FULL_DATA_CROSS:-true}"
 
 # Fraction of each category/label stratum held out for evaluation. Applies to
 # both protocols: 0.50 is the historical half, 0.30 keeps more for training.

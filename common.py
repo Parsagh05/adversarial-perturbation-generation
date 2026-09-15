@@ -273,6 +273,20 @@ def _balanced_category_groups(
     return balanced, original_sizes
 
 
+def retained_protocol_samples(samples: Sequence) -> list:
+    """Return every sample retained by the selected balanced/full protocol."""
+
+    groups, _ = _balanced_category_groups(
+        samples,
+        int(os.environ.get("SPLIT_SEED", "111")),
+        split_protocol(),
+    )
+    return sorted(
+        (sample for group in groups.values() for sample in group),
+        key=lambda sample: sample.protocol_id,
+    )
+
+
 def load_protocol() -> tuple[pd.DataFrame, pd.DataFrame]:
     train = _validate_partition_frame(ATTACK_TRAIN_CSV, "attack_train")
     evaluation = _validate_partition_frame(EVALUATION_CSV, "evaluation")

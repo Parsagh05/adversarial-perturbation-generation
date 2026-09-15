@@ -42,7 +42,7 @@ SETUP_ID = os.environ["SETUP_ID"]
 if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
-from setup_catalog import derive_steps
+from setup_catalog import derive_steps, full_data_cross_setting
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import (
@@ -67,6 +67,7 @@ from common import (
     parse_fraction_list,
     parse_numeric,
     protocol_datasets,
+    retained_protocol_samples,
     select_attack_train_fraction,
     sha256_file,
     source_datasets,
@@ -201,6 +202,7 @@ all_discovered = discover_anomaly_datasets(
     max_samples_per_category=None,
     train_normal=False,
 )
+complete_protocol_samples = retained_protocol_samples(all_discovered)
 samples, assignments, rank_info, protocol_frame = bind_discovered_samples_from_partition_csvs(
     all_discovered, ATTACK_TRAIN_CSV, EVALUATION_CSV
 )
@@ -208,18 +210,19 @@ assert_partition_disjoint(assignments)
 
 # Hard leakage guards.
 SPLIT_PROTOCOL = split_protocol()
-# Under "full", cross-dataset trains on the complete source dataset: it is
-# delivered to a different dataset entirely, so nothing leaks. The historical
-# "balanced" protocol keeps reusing the attack_train half for both settings.
-CROSS_DATASET_FULL_SOURCE = SPLIT_PROTOCOL == "full"
+FULL_DATA_CROSS = full_data_cross_setting()
+# The split protocol controls which natural dataset rows are retained. This
+# independent switch controls whether cross-dataset consumes both retained
+# halves or reuses the held-out per-dataset perturbation.
+CROSS_DATASET_FULL_SOURCE = FULL_DATA_CROSS
 
 
 def dataset_partitions():
     """Yield ``(key, use_full_source, settings)`` for every delta to optimize.
 
-    balanced keeps one delta serving both transfer settings. full optimizes the
-    same-dataset delta on the attack_train half as usual, plus a separate delta
-    on the complete source dataset for cross-dataset delivery.
+    The ordinary branch keeps one attack_train delta serving both transfer
+    settings. FULL_DATA_CROSS=true adds a complete-source delta for
+    complete-target delivery under either balanced or full protocol.
     """
 
     if not CROSS_DATASET_FULL_SOURCE:
@@ -257,7 +260,10 @@ def source_training_samples(source_dataset: str, source_label: int, pool, full: 
             key=lambda s: s.protocol_id,
         )
     return sorted(
-        [s for s in samples if s.dataset == source_dataset and s.label == source_label],
+        [
+            s for s in complete_protocol_samples
+            if s.dataset == source_dataset and s.label == source_label
+        ],
         key=lambda s: s.protocol_id,
     )
 
@@ -397,6 +403,10 @@ for source_dataset in SOURCE_DATASETS:
                             "complete_source_dataset" if use_full_source
                             else "attack_train_partition"
                         ),
+                        **({
+                            "full_data_cross": FULL_DATA_CROSS,
+                            "source_partition_policy": "all",
+                        } if use_full_source else {}),
                         "benchmark_commit": REPO_COMMIT,
                         "anomalyclip_loader_commit": ANOMALYCLIP_COMMIT,
                         "generator_script_sha256": GENERATOR_SCRIPT_SHA256,
@@ -424,7 +434,10 @@ for source_dataset in SOURCE_DATASETS:
                         "step_size_schedule": STEP_SIZE_SCHEDULE,
                         "step_size_min_ratio": STEP_SIZE_MIN_RATIO,
                         "diagnostic_interval": DIAGNOSTIC_INTERVAL,
-                        "checkpoint_selection_partition": "full_attack_train",
+                        "checkpoint_selection_partition": (
+                            "complete_source_dataset" if use_full_source
+                            else "full_attack_train"
+                        ),
                     }
                     expected.update(surrogate.prompt_provenance)
                     if reusable(pt_path, expected):
@@ -472,10 +485,15 @@ for source_dataset in SOURCE_DATASETS:
                             raise RuntimeError(f"Linf budget violation: {actual_linf} > {EPSILON}")
                         evaluation_counts = {
                             target: sum(
-                                1 for s in samples
+                                1 for s in (
+                                    complete_protocol_samples if use_full_source else samples
+                                )
                                 if s.dataset == target
                                 and s.label == source_label
-                                and assignments[s.protocol_id] == "evaluation"
+                                and (
+                                    use_full_source
+                                    or assignments[s.protocol_id] == "evaluation"
+                                )
                             )
                             for target in EVALUATION_DATASETS
                         }
@@ -487,8 +505,11 @@ for source_dataset in SOURCE_DATASETS:
                             "attack_generator": "frozen_public_CLIP_surrogate",
                             "target_model_access_during_optimization": False,
                             "target_model_training_or_finetuning": False,
-                            "optimization_partition": "attack_train",
-                            "evaluation_partition_seen_during_optimization": False,
+                            "optimization_partition": (
+                                "complete_source_dataset" if use_full_source
+                                else "attack_train"
+                            ),
+                            "evaluation_partition_seen_during_optimization": use_full_source,
                             "attack_train_sample_count": len(source_train),
                             "attack_train_sample_ids": [s.protocol_id for s in source_train],
                             "source_datasets": list(SOURCE_DATASETS),
@@ -512,10 +533,15 @@ for source_dataset in SOURCE_DATASETS:
                             "protocol_attack_train_csv": str(ATTACK_TRAIN_CSV),
                             "protocol_evaluation_csv": str(EVALUATION_CSV),
                             "notes": (
-                                "One source-dataset universal delta. It is optimized exactly once "
-                                "from the selected nested attack_train subset and can be evaluated "
-                                "on either MVTec or VisA. No evaluation image and no target anomaly "
-                                "model is used during optimization."
+                                "One source-dataset universal delta, optimized exactly once on "
+                                + (
+                                    "the complete source test dataset for delivery only to the "
+                                    "complete other dataset."
+                                    if use_full_source else
+                                    "the selected attack_train subset for same-dataset or "
+                                    "held-out cross-dataset delivery."
+                                )
+                                + " No target anomaly model is used during optimization."
                             ),
                         }
                         torch.save({"delta": delta.half(), "metadata": metadata}, pt_path)
@@ -556,14 +582,16 @@ for row in artifact_rows:
         )
         if setting not in delivery_rows or setting not in row["transfer_settings"]:
             continue
-        # Under "full", a cross-dataset delta trained on the complete source is
-        # delivered to the complete target dataset: it never trained on any of
-        # those images, so the train/evaluation split does not constrain it.
+        # Only the explicit full-cross mode delivers both target partitions.
+        # Otherwise cross-dataset reuses the per-dataset attack_train delta and
+        # attacks the other dataset's evaluation partition.
         deliver_whole_target = (
             CROSS_DATASET_FULL_SOURCE and setting == "cross_dataset"
         )
         attacked_eval_ids = sorted(
-            s.protocol_id for s in samples
+            s.protocol_id for s in (
+                complete_protocol_samples if deliver_whole_target else samples
+            )
             if s.dataset == target_dataset
             and s.label == row["source_label"]
             and (deliver_whole_target or assignments[s.protocol_id] == "evaluation")
@@ -580,6 +608,21 @@ for row in artifact_rows:
                 f"Leakage: {artifact} trains on {len(overlap)} of the images it "
                 f"attacks in {target_dataset} ({setting})"
             )
+        cross_provenance = ({
+            "full_data_cross": FULL_DATA_CROSS,
+            "cross_data_mode": (
+                "fullcross"
+                if CROSS_DATASET_FULL_SOURCE
+                else "halfcross"
+            ),
+            "source_partition_policy": (
+                "all" if CROSS_DATASET_FULL_SOURCE else "attack_train"
+            ),
+            "target_partition_policy": (
+                "all" if CROSS_DATASET_FULL_SOURCE else "evaluation"
+            ),
+            "source_target_id_overlap_count": len(overlap),
+        } if setting == "cross_dataset" else {})
         delivery_rows[setting].append({
             "scope": BUNDLE_SCOPES[setting],
             "source_dataset": row["source_dataset"],
@@ -587,6 +630,7 @@ for row in artifact_rows:
             "transfer_setting": setting,
             "split_protocol": row["split_protocol"],
             "training_source": row["training_source"],
+            **cross_provenance,
             "direction": row["direction"],
             "source_label": row["source_label"],
             "target_label": row["target_label"],
@@ -603,7 +647,10 @@ for row in artifact_rows:
             "artifact_sha256": row["artifact_file_sha256"],
             "protocol_split_sha256": protocol_sha,
             "label_balance_policy": row["label_balance_policy"],
-            "evaluation_ids_source": "evaluation_test_indices.csv",
+            "evaluation_ids_source": (
+                "complete_retained_protocol_cohort"
+                if deliver_whole_target else "evaluation_test_indices.csv"
+            ),
             "apply_only_to_clean_label": row["source_label"],
             "keep_opposite_label_clean": True,
             "image_size": IMAGE_SIZE,

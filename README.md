@@ -203,15 +203,26 @@ abnormal instead of being cut to 20 / 20. On MVTec this keeps all 1725.
 ```bash
 export SPLIT_PROTOCOL=full            # keep every image
 export EVALUATION_FRACTION=0.50       # share of each category/label held out
+export FULL_DATA_CROSS=true           # both retained halves -> both retained halves
+# Or reuse the per-dataset delta for a held-out transfer experiment:
+export FULL_DATA_CROSS=false          # source attack_train -> target evaluation
 export SPLIT_PROTOCOL=balanced        # back to the historical protocol
 ```
 
-Two scopes behave differently under `full`:
+The two switches produce four cross-dataset behaviors:
 
-- **cross-dataset** trains on the *complete* source dataset and is delivered to
-  the complete other dataset, instead of reusing the per-dataset delta that saw
-  only the attack-train half. It is delivered to a different dataset entirely,
-  so nothing leaks.
+| `SPLIT_PROTOCOL` | `FULL_DATA_CROSS` | Cross training | Cross evaluation |
+|---|---:|---|---|
+| `balanced` | `true` | complete balanced source cohort | complete balanced target cohort |
+| `balanced` | `false` | balanced source `attack_train` | balanced target `evaluation` |
+| `full` | `true` | complete natural source cohort | complete natural target cohort |
+| `full` | `false` | full source `attack_train` | full target `evaluation` |
+
+`FULL_DATA_CROSS=false` reuses the exact per-dataset delta. The flag never
+changes the per-dataset scope.
+
+One additional scope behaves differently under `full`:
+
 - **per-image** covers every test image rather than only the held-out half,
   because it fits the very image it attacks and the split does not constrain it.
 
@@ -220,10 +231,13 @@ part of each category, deliver to the held-out part.
 
 The protocol is recorded so an evaluator can detect it:
 
-- the setup ID, e.g. `ep7p14_cat100_img100_eps2_full` (`balanced` adds no component)
+- the setup ID contains `_fullcross` or `_halfcross`; `full` retains its
+  existing `_full` protocol component while `balanced` adds no protocol component
 - `label_balance_policy` on every protocol CSV row
 - `split_protocol` on every manifest and diagnostics row, plus `training_source`
   on per-dataset rows (`attack_train_partition` or `complete_source_dataset`)
+- `full_data_cross`, `cross_data_mode`, `source_partition_policy`, and
+  `target_partition_policy` on every cross-dataset manifest row
 
 ## Balanced protocol
 
@@ -346,7 +360,8 @@ entries:
 
 `SETUP_EPOCHS="50"` gives 4 setups all named `ep50_*`;
 `SETUP_EPOCHS="7.14:100:100,50"` gives 8. Because IDs are derived, generated
-entries name themselves and nothing else needs editing.
+entries name themselves and nothing else needs editing. These are selection
+IDs; the output's effective ID also records `_fullcross` or `_halfcross`.
 
 ### Budgets are epochs, and each scope gets its own
 
@@ -366,9 +381,10 @@ simply needs enough steps to converge.
 
 The default `7.14:100:100` reproduces the historical 800 / 200 / 100 step
 counts exactly at the default batch sizes, and names itself
-`ep7p14_cat100_img100_eps2`. cross-dataset takes no value of its own because it delivers the
-per-dataset delta. A bare number gives every scope the same budget and keeps
-the compact `ep50_eps2` form.
+`ep7p14_cat100_img100_eps2`. Cross-dataset has no separate epoch value: a
+`halfcross` run delivers the per-dataset delta, while `fullcross` trains its
+complete-cohort delta using the per-dataset epoch budget. A bare number gives
+every scope the same budget and keeps the compact epoch component.
 
 Because steps are derived, a category holding more images automatically gets
 more steps at the same budget -- which is the point. Checkpoint selection uses
@@ -381,11 +397,12 @@ A setup ID is a pure function of the settings that change the work, so a run
 can never be filed under a name describing different parameters:
 
 ```
-epochs + epsilon + [ce_focal_dice] + [protocol] + [trainNN] + [learnable_prompt]
+epochs + epsilon + [ce_focal_dice] + [protocol] + cross_mode + [trainNN] + [learnable_prompt]
 ```
 
 Overriding the epoch budget renames the output on its own. `SMOKE_EPOCHS=50`
-against `ep7p14_cat100_img100_eps4` writes to `ep50_eps4`,
+against `ep7p14_cat100_img100_eps4` writes to `ep50_eps4_fullcross` under the
+default balanced/full-cross configuration,
 and `audit_generation.py` applies the same derivation, so it looks where the
 run actually wrote. When an override makes two catalog rows resolve to
 the same name, the launcher keeps the first and reports the collapse instead
@@ -443,13 +460,14 @@ complete `setups/` directory tree, including perturbations, manifests,
 diagnostics, protocols, and logs. Existing per-scope ZIP files are not nested
 inside it, avoiding duplicate copies of the same perturbations.
 
-For example, a MVTec dataset-level run is packaged as
-`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2.zip`. Dataset, scope, epochs,
-epsilon, and loss setup remain separate. A relaxed-loss run uses a distinct
-name such as `canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_ce_focal_dice.zip`
+For example, a balanced/full-cross MVTec dataset-level run is packaged as
+`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_fullcross.zip`.
+Dataset, scope, epochs, epsilon, cross mode, and loss setup remain separate. A
+relaxed-loss run uses a distinct name such as
+`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_ce_focal_dice_fullcross.zip`
 and cannot overwrite the default-loss setup.
 Likewise, a learnable-prompt run has a distinct name such as
-`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_ce_focal_dice_learnable_prompt.zip`.
+`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_ce_focal_dice_fullcross_learnable_prompt.zip`.
 
 Do not merge these archives with the old `canonical_clip_*` bundles under the
 same dataset version. Publish them as a new Kaggle dataset version and rerun the

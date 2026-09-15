@@ -16,7 +16,12 @@ from adversarial_harness.prompts import (
     LEARNABLE_PROMPT_AGGREGATION,
     frozen_ensemble_sha256,
 )
-from setup_catalog import SETUPS, effective_setup_id, split_protocol_setting
+from setup_catalog import (
+    SETUPS,
+    effective_setup_id,
+    full_data_cross_setting,
+    split_protocol_setting,
+)
 
 
 def _csv_env(name: str, default: str) -> tuple[str, ...]:
@@ -36,6 +41,8 @@ SMOKE_EPOCHS = float(os.environ.get("SMOKE_EPOCHS", "0.02"))
 EXPECTED_ATTACK_SEED = int(os.environ.get("ATTACK_SEED", "111"))
 ATTACK_TRAIN_FRACTION = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 SPLIT_PROTOCOL = split_protocol_setting()
+FULL_DATA_CROSS = full_data_cross_setting()
+CROSS_DATASET_FULL_SOURCE = FULL_DATA_CROSS
 # Read the same way the runners read it, so auditing a run that generated one
 # direction checks for that direction instead of reporting the other missing.
 EXPECTED_DIRECTIONS = _csv_env("DIRECTIONS", ",".join(VALID_DIRECTIONS))
@@ -116,6 +123,127 @@ def audit_protocol(setup_root: Path) -> None:
         raise RuntimeError(f"A protocol stratum is missing a label in {setup_root.name}")
     if SPLIT_PROTOCOL == "balanced" and not counts[0].eq(counts[1]).all():
         raise RuntimeError(f"Unbalanced protocol in {setup_root.name}")
+
+
+def audit_dataset_cohort_routing(
+    setup_root: Path, scope: str, manifest: pd.DataFrame, manifest_path: Path
+) -> None:
+    """Verify dataset-scope cohorts from explicit manifest provenance."""
+
+    if scope == "dataset":
+        if set(manifest.training_source.astype(str)) != {"attack_train_partition"}:
+            raise RuntimeError(f"per_dataset routing changed in {manifest_path}")
+        return
+    if scope != "cross_dataset":
+        return
+
+    required = {
+        "full_data_cross",
+        "cross_data_mode",
+        "source_partition_policy",
+        "target_partition_policy",
+        "training_source",
+        "source_target_id_overlap_count",
+    }
+    if not required.issubset(manifest.columns):
+        raise RuntimeError(f"Missing cross-dataset cohort provenance in {manifest_path}")
+
+    recorded_flags = set(
+        manifest.full_data_cross.astype(str).str.strip().str.lower()
+    )
+    if recorded_flags != {str(FULL_DATA_CROSS).lower()}:
+        raise RuntimeError(f"Wrong FULL_DATA_CROSS value in {manifest_path}")
+
+    if CROSS_DATASET_FULL_SOURCE:
+        expected_mode = "fullcross"
+        expected_training_source = "complete_source_dataset"
+        expected_source_policy = "all"
+        expected_target_policy = "all"
+        expected_target_partitions = {"attack_train", "evaluation"}
+    else:
+        expected_mode = "halfcross"
+        expected_training_source = "attack_train_partition"
+        expected_source_policy = "attack_train"
+        expected_target_policy = "evaluation"
+        expected_target_partitions = {"evaluation"}
+
+    expected_values = {
+        "cross_data_mode": expected_mode,
+        "training_source": expected_training_source,
+        "source_partition_policy": expected_source_policy,
+        "target_partition_policy": expected_target_policy,
+    }
+    for column, expected in expected_values.items():
+        if set(manifest[column].astype(str)) != {expected}:
+            raise RuntimeError(
+                f"Wrong {column} in {manifest_path}: expected {expected}"
+            )
+    if set(manifest.source_target_id_overlap_count.astype(int)) != {0}:
+        raise RuntimeError(f"Cross-dataset source/target leakage in {manifest_path}")
+
+    train = pd.read_csv(setup_root / "protocol" / "attack_train_indices.csv")
+    evaluation = pd.read_csv(setup_root / "protocol" / "evaluation_test_indices.csv")
+    train = train.assign(_audit_partition="attack_train")
+    evaluation = evaluation.assign(_audit_partition="evaluation")
+    protocol = pd.concat([train, evaluation], ignore_index=True)
+
+    def complete_label_count(dataset: str, label: int) -> int:
+        size_column = (
+            "balanced_label_stratum_size"
+            if SPLIT_PROTOCOL == "balanced"
+            else "original_label_stratum_size"
+        )
+        strata = protocol[
+            (protocol.dataset.astype(str) == dataset)
+            & (protocol.label.astype(int) == label)
+        ][["category", size_column]].drop_duplicates()
+        return int(strata[size_column].astype(int).sum())
+
+    for row in manifest.itertuples(index=False):
+        source = protocol[
+            (protocol.dataset.astype(str) == str(row.source_dataset))
+            & (protocol.label.astype(int) == int(row.source_label))
+        ]
+        target = protocol[
+            (protocol.dataset.astype(str) == str(row.target_dataset))
+            & (protocol.label.astype(int) == int(row.source_label))
+            & protocol["_audit_partition"].isin(expected_target_partitions)
+        ]
+        if expected_source_policy != "all":
+            source = source[source["_audit_partition"] == "attack_train"]
+            fraction = float(row.attack_train_fraction)
+            source = source[
+                source.attack_train_rank.astype(int)
+                <= np.maximum(
+                    1,
+                    np.ceil(
+                        source.attack_train_stratum_size.astype(int) * fraction
+                    ),
+                )
+            ]
+            expected_source_count = len(source)
+        else:
+            expected_source_count = complete_label_count(
+                str(row.source_dataset), int(row.source_label)
+            )
+        expected_target_count = (
+            complete_label_count(str(row.target_dataset), int(row.source_label))
+            if expected_target_policy == "all" else len(target)
+        )
+        if expected_source_count != int(row.attack_train_image_count):
+            raise RuntimeError(
+                f"Wrong source training count in {manifest_path}: expected "
+                f"{expected_source_count}, found {row.attack_train_image_count}"
+            )
+        if expected_target_count != int(row.evaluation_attacked_image_count):
+            raise RuntimeError(
+                f"Wrong attacked target count in {manifest_path}: expected "
+                f"{expected_target_count}, found {row.evaluation_attacked_image_count}"
+            )
+        if str(row.source_dataset) == str(row.target_dataset):
+            raise RuntimeError(f"Cross-dataset row has the same source and target")
+        if set(source.protocol_id.astype(str)) & set(target.protocol_id.astype(str)):
+            raise RuntimeError(f"Cross-dataset source/target leakage in {manifest_path}")
 
 
 def audit_scope(
@@ -221,6 +349,7 @@ def audit_scope(
         raise RuntimeError(
             f"Wrong split protocol in {manifest_path}: expected {SPLIT_PROTOCOL}"
         )
+    audit_dataset_cohort_routing(setup_root, scope, manifest, manifest_path)
 
     numeric_columns = (
         "initial_total_loss",
@@ -304,8 +433,14 @@ def main() -> None:
         # Same derivation as train.sh, so the audit looks where the run wrote.
         effective_id = effective_setup_id(
             setup, SMOKE_EPOCHS if SMOKE else None, ATTACK_TRAIN_FRACTION,
-            SPLIT_PROTOCOL,
+            SPLIT_PROTOCOL, FULL_DATA_CROSS,
         )
+        expected_cross_tag = "_fullcross" if FULL_DATA_CROSS else "_halfcross"
+        other_cross_tag = "_halfcross" if FULL_DATA_CROSS else "_fullcross"
+        if expected_cross_tag not in effective_id or other_cross_tag in effective_id:
+            raise RuntimeError(
+                f"Setup ID does not encode cross cohort mode: {effective_id}"
+            )
         prompt_folder = (
             "frozen_prompt"
             if setup.prompt_mode == "frozen_winclip"

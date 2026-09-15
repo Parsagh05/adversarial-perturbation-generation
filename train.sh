@@ -11,6 +11,7 @@ export PROJECT_ROOT="$ROOT"
 PIPELINE_OUTPUT="$OUTPUT_BASE"
 export WORK_DIR="${WORK_DIR:-$PIPELINE_OUTPUT/runtime}"
 export ATTACK_TRAIN_FRACTION
+export FULL_DATA_CROSS="${FULL_DATA_CROSS:-true}"
 export PER_IMAGE_EFFECTIVE_BATCH_SIZE="$PER_IMAGE_BATCH_SIZE"
 export PER_IMAGE_MICRO_BATCH_SIZE="$PER_IMAGE_BATCH_SIZE"
 export DIRECTIONS="${DIRECTIONS:-normal_to_abnormal,abnormal_to_normal}"
@@ -21,6 +22,14 @@ export OVERWRITE_EXISTING="${OVERWRITE_EXISTING:-false}"
 export PER_IMAGE_EVALUATION_FRACTION="${PER_IMAGE_EVALUATION_FRACTION:-1.0}"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export PYTHONUNBUFFERED=1
+
+case "${FULL_DATA_CROSS,,}" in
+  true|false) ;;
+  *)
+    echo "FULL_DATA_CROSS must be true or false" >&2
+    exit 2
+    ;;
+esac
 
 for name in OUTPUT_BASE; do
   value="${!name}"
@@ -81,7 +90,12 @@ fi
 SETUP_TABLE="$(PYTHONPATH="$ROOT" "$PYTHON" - <<'PYEOF'
 import os
 import sys
-from setup_catalog import SETUPS, effective_setup_id, split_protocol_setting
+from setup_catalog import (
+    SETUPS,
+    effective_setup_id,
+    full_data_cross_setting,
+    split_protocol_setting,
+)
 
 # The effective epoch budget and train fraction are known before any setup runs,
 # so the output name is resolved here rather than after an override.
@@ -89,13 +103,16 @@ smoke = os.environ.get("SMOKE_TEST", "false").strip().lower() in {"1", "true", "
 override = float(os.environ["SMOKE_EPOCHS"]) if smoke else None
 fraction = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 protocol = split_protocol_setting()
+full_data_cross = full_data_cross_setting()
 produced = {}
 for setup_id, setup in SETUPS.items():
     # A smoke override collapses every scope onto one count.
     epochs = setup.epochs if override is None else override
     category_epochs = setup.category_epochs if override is None else override
     image_epochs = setup.image_epochs if override is None else override
-    effective = effective_setup_id(setup, override, fraction, protocol)
+    effective = effective_setup_id(
+        setup, override, fraction, protocol, full_data_cross
+    )
     if effective in produced:
         # A single step override collapses every step count onto one name, so
         # distinct catalog rows would otherwise overwrite each other's output.
@@ -190,8 +207,8 @@ while IFS=$'\t' read -r id epochs category_epochs image_epochs epsilon loss_form
     export PROMPT_MODE="$prompt_mode"
     # Each scope fits a different number of images per delta, so each carries
     # its own epoch budget; the runner derives its PGD step count from that and
-    # its own training-set size. cross_dataset delivers the per-dataset delta
-    # and so has no budget of its own.
+    # its own training-set size. cross_dataset has no separate budget: halfcross
+    # reuses the per-dataset delta and fullcross uses the per-dataset budget.
     export PER_DATASET_EPOCHS="$epochs"
     export PER_CATEGORY_EPOCHS="$category_epochs"
     export PER_IMAGE_EPOCHS="$image_epochs"

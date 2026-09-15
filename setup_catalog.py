@@ -7,7 +7,8 @@ different problems: a per-dataset delta must satisfy hundreds of images at
 once, a per-category delta about a dozen, and a per-image delta exactly one.
 ``SETUP_EPOCHS=7.14:100:100,5:60:50`` sweeps two such settings. A bare ``100``
 means all three scopes use 100. Cross-dataset takes no value of its own: it
-delivers the per-dataset delta.
+either delivers the per-dataset delta (``halfcross``) or uses the same epoch
+budget for its complete-cohort delta (``fullcross``).
 
 An epoch is one pass over whatever that delta trains on, so the PGD step count
 is derived at run time as ``ceil(epochs * ceil(n_images / batch))``. That keeps
@@ -82,6 +83,15 @@ def split_protocol_setting() -> str:
     return protocol
 
 
+def full_data_cross_setting() -> bool:
+    """Whether cross-dataset uses the complete source and target cohorts."""
+
+    raw = os.environ.get("FULL_DATA_CROSS", "true").strip().lower()
+    if raw not in {"true", "false"}:
+        raise ValueError(f"FULL_DATA_CROSS must be true or false, got {raw!r}")
+    return raw == "true"
+
+
 def _epoch_number(value: float) -> str:
     """``7.14`` -> ``7p14``; keeps fractional budgets filesystem-safe."""
 
@@ -109,6 +119,7 @@ def compose_setup_id(
     prompt_mode: str,
     attack_train_fraction: float = 1.0,
     split_protocol: str = "balanced",
+    full_data_cross: bool | None = None,
 ) -> str:
     """Build the canonical ID for one effective configuration.
 
@@ -128,6 +139,8 @@ def compose_setup_id(
     protocol = _protocol_tag(split_protocol)
     if protocol:
         parts.append(protocol)
+    if full_data_cross is not None:
+        parts.append("fullcross" if full_data_cross else "halfcross")
     fraction = _fraction_tag(attack_train_fraction)
     if fraction:
         parts.append(fraction)
@@ -141,6 +154,7 @@ def effective_setup_id(
     epochs: float | None = None,
     attack_train_fraction: float = 1.0,
     split_protocol: str = "balanced",
+    full_data_cross: bool | None = None,
 ) -> str:
     """Canonical ID for a catalog entry after any epoch/fraction override.
 
@@ -156,6 +170,7 @@ def effective_setup_id(
         setup.prompt_mode,
         attack_train_fraction,
         split_protocol,
+        full_data_cross,
     )
 
 
@@ -243,6 +258,8 @@ PROMPT_MODES = ("frozen_winclip", "learnable_object_agnostic")
 def build_setups(
     epochs_grid: tuple[tuple[float, float, float], ...] | None = None,
     epsilons: tuple[str, ...] | None = None,
+    split_protocol: str = "balanced",
+    full_data_cross: bool | None = None,
 ) -> dict[str, Setup]:
     """Cartesian product over prompt family, loss, epochs and epsilon.
 
@@ -260,6 +277,8 @@ def build_setups(
                     setup_id = compose_setup_id(
                         epochs, category_epochs, image_epochs,
                         label, loss_formulation, prompt_mode,
+                        split_protocol=split_protocol,
+                        full_data_cross=full_data_cross,
                     )
                     setups[setup_id] = Setup(
                         epochs=epochs,

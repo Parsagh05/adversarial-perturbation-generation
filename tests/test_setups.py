@@ -16,6 +16,7 @@ from setup_catalog import (
     effective_setup_id,
     epoch_grid,
     epsilon_grid,
+    full_data_cross_setting,
     split_protocol_setting,
 )
 
@@ -238,7 +239,8 @@ class ShellLauncherTests(unittest.TestCase):
             [
                 setup_id, str(setup.epochs), str(setup.category_epochs),
                 str(setup.image_epochs), setup.epsilon_label,
-                setup.loss_formulation, setup.prompt_mode, setup_id,
+                setup.loss_formulation, setup.prompt_mode,
+                effective_setup_id(setup, full_data_cross=True),
             ]
             for setup_id, setup in SETUPS.items()
         ]
@@ -301,6 +303,28 @@ class SplitProtocolTests(unittest.TestCase):
             f"{BASE}_eps4_full_train20",
         )
 
+    def test_both_cross_modes_get_distinct_full_protocol_names(self) -> None:
+        setup = SETUPS[f"{BASE}_eps4"]
+        self.assertEqual(
+            effective_setup_id(setup, None, 1.0, "full", False),
+            f"{BASE}_eps4_full_halfcross",
+        )
+        self.assertEqual(
+            effective_setup_id(setup, None, 1.0, "full", True),
+            f"{BASE}_eps4_full_fullcross",
+        )
+
+    def test_balanced_protocol_supports_both_cross_modes(self) -> None:
+        setup = SETUPS[f"{BASE}_eps4"]
+        self.assertEqual(
+            effective_setup_id(setup, None, 1.0, "balanced", False),
+            f"{BASE}_eps4_halfcross",
+        )
+        self.assertEqual(
+            effective_setup_id(setup, None, 1.0, "balanced", True),
+            f"{BASE}_eps4_fullcross",
+        )
+
     def test_learnable_suffix_stays_last(self) -> None:
         setup = SETUPS[f"{BASE}_eps2_learnable_prompt"]
         derived = effective_setup_id(setup, None, 1.0, "full")
@@ -314,15 +338,42 @@ class SplitProtocolTests(unittest.TestCase):
 
     def test_launcher_names_carry_the_protocol(self) -> None:
         rows = _launcher_table(SPLIT_PROTOCOL="full")
-        self.assertTrue(all(row[7].count("_full") == 1 for row in rows))
+        self.assertTrue(all("_full_fullcross" in row[7] for row in rows))
         balanced = _launcher_table(SPLIT_PROTOCOL="balanced")
-        self.assertTrue(all("_full" not in row[7] for row in balanced))
+        self.assertTrue(all("_full_fullcross" not in row[7] for row in balanced))
+        self.assertTrue(all("_fullcross" in row[7] for row in balanced))
+
+    def test_launcher_names_carry_the_cross_half_mode(self) -> None:
+        rows = _launcher_table(SPLIT_PROTOCOL="full", FULL_DATA_CROSS="false")
+        self.assertTrue(all("_full_halfcross" in row[7] for row in rows))
+        self.assertTrue(all(row[7].endswith("_learnable_prompt") for row in rows[4:]))
+
+    def test_full_data_cross_defaults_true_and_validates(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FULL_DATA_CROSS", None)
+            self.assertTrue(full_data_cross_setting())
+        with mock.patch.dict(os.environ, {"FULL_DATA_CROSS": "false"}):
+            self.assertFalse(full_data_cross_setting())
+        with mock.patch.dict(os.environ, {"FULL_DATA_CROSS": "yes"}):
+            with self.assertRaises(ValueError):
+                full_data_cross_setting()
+
+    def test_build_setups_threads_the_cross_mode_into_ids(self) -> None:
+        generated = build_setups(
+            epochs_grid=((12, 12, 12),),
+            epsilons=("4/255",),
+            split_protocol="full",
+            full_data_cross=False,
+        )
+        self.assertEqual(len(generated), 4)
+        self.assertTrue(all("_full_halfcross" in name for name in generated))
 
     def test_config_exposes_the_switch(self) -> None:
         config = (Path(__file__).resolve().parents[1] / "config.sh").read_text(
             encoding="utf-8"
         )
         self.assertIn('SPLIT_PROTOCOL="${SPLIT_PROTOCOL:-balanced}"', config)
+        self.assertIn('FULL_DATA_CROSS="${FULL_DATA_CROSS:-true}"', config)
 
 
 if __name__ == "__main__":

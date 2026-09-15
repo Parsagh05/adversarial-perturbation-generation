@@ -20,6 +20,7 @@ from common import (
     parse_numeric,
     protocol_datasets,
     prepare_protocol_split,
+    retained_protocol_samples,
     source_datasets,
 )
 
@@ -196,6 +197,19 @@ class SplitProtocolGroupingTests(unittest.TestCase):
         self.assertEqual(len(groups[("mvtec", "bottle", 1)]), 63)
         self.assertEqual(len(groups[("mvtec", "cable", 1)]), 92)
         self.assertEqual(sum(len(v) for v in groups.values()), 20 + 63 + 58 + 92)
+
+    def test_complete_cross_cohort_respects_the_selected_protocol(self) -> None:
+        samples = self._samples()
+        with mock.patch.dict(
+            os.environ, {"SPLIT_PROTOCOL": "balanced", "SPLIT_SEED": "111"}
+        ):
+            balanced = retained_protocol_samples(samples)
+        with mock.patch.dict(
+            os.environ, {"SPLIT_PROTOCOL": "full", "SPLIT_SEED": "111"}
+        ):
+            full = retained_protocol_samples(samples)
+        self.assertEqual(len(balanced), 2 * (20 + 58))
+        self.assertEqual(len(full), len(samples))
 
     def test_protocols_are_named_and_validated(self) -> None:
         self.assertEqual(common.label_policy_for("balanced"), common.LABEL_BALANCE_POLICY)

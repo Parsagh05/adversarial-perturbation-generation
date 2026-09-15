@@ -73,6 +73,40 @@ class CompleteSourceLeakageCheckTests(unittest.TestCase):
         # The old artifact-level form compared against every evaluation id.
         self.assertNotIn("if train_ids & evaluation_ids:", script)
 
+    def test_full_cross_source_is_controlled_independently(self) -> None:
+        script = (ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
+        self.assertIn("FULL_DATA_CROSS = full_data_cross_setting()", script)
+        self.assertIn(
+            "CROSS_DATASET_FULL_SOURCE = FULL_DATA_CROSS",
+            script,
+        )
+
+    def test_cross_manifest_records_explicit_cohort_policies(self) -> None:
+        script = (ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
+        for field in (
+            "full_data_cross",
+            "cross_data_mode",
+            "source_partition_policy",
+            "target_partition_policy",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(f'"{field}"', script)
+        self.assertIn('"fullcross"', script)
+        self.assertIn('"halfcross"', script)
+
+    def test_non_full_cross_reuses_the_per_dataset_delta(self) -> None:
+        script = (ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
+        self.assertIn('yield "", False, tuple(TRANSFER_SETTINGS)', script)
+
+    def test_full_cross_uses_complete_discovered_source_and_target(self) -> None:
+        script = (ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
+        self.assertIn("s for s in complete_protocol_samples", script)
+        self.assertIn(
+            "complete_protocol_samples if deliver_whole_target else samples",
+            script,
+        )
+        self.assertIn('"complete_retained_protocol_cohort"', script)
+
     def test_check_runs_after_the_delivered_set_is_known(self) -> None:
         script = (ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
         computed = script.index("attacked_eval_ids = sorted(")

@@ -95,6 +95,10 @@ export RUN_CROSS_DATASET=true
 export RUN_PER_CATEGORY=true
 export RUN_PER_IMAGE=true
 export ATTACK_TRAIN_FRACTION=1.0
+export SPLIT_PROTOCOL=full
+# true: complete retained source -> complete retained target (default)
+# false: source attack_train -> target evaluation, reusing per_dataset delta
+export FULL_DATA_CROSS=true
 export SMOKE_TEST=false
 export OVERWRITE_EXISTING=false
 
@@ -124,6 +128,13 @@ single optimization pass.
 
 `full_outputs.zip` contains the complete setup tree but excludes the redundant
 per-scope ZIP files already stored inside individual setup directories.
+
+The cross mode is explicit in every effective setup ID: `_fullcross` uses both
+retained halves and `_halfcross` uses source `attack_train` plus target
+`evaluation`. The split convention remains unchanged: `full` contributes
+`_full`, while `balanced` contributes no protocol component. For example,
+`..._full_fullcross` and `..._full_halfcross` are distinct. The per-dataset
+cohort is unchanged.
 
 The default setup IDs are `ep7p14_cat100_img100_eps2` and `ep7p14_cat100_img100_eps4`, both using the
 default `margin_topk` loss. The alternate `ce_focal_dice` loss adds two more,
