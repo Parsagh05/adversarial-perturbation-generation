@@ -130,6 +130,14 @@ MARGIN_HINGE_DISPLACEMENT="${MARGIN_HINGE_DISPLACEMENT:-}"
 # cancels MARGIN_HINGE_DISPLACEMENT. Applies to the scopes that share one
 # delta, not to per-image, and names the setup (0.9 -> _mom0p9).
 MOMENTUM_DECAY="${MOMENTUM_DECAY:-}"
+
+# Which iterate the optimization returns. best scores the delta over the whole
+# attack-train cohort every DIAGNOSTIC_INTERVAL steps and keeps the lowest,
+# with the clean delta as the baseline, so a run that never beats clean returns
+# zeros. final returns the last step, which is what the universal-attack
+# papers do. The trajectory is the same either way; only the kept point
+# differs, and final names the setup (_final).
+CHECKPOINT_SELECTION="${CHECKPOINT_SELECTION:-best}"
 MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL="${MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL:-0.20}"
 MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL="${MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL:-0.40}"
 

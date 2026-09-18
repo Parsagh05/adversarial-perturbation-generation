@@ -47,6 +47,7 @@ from setup_catalog import (
     full_data_cross_setting,
     margin_hinge_setting,
     momentum_decay_setting,
+    checkpoint_selection_setting,
 )
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
@@ -138,6 +139,7 @@ NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
 STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "constant")
 MARGIN_HINGE_DISPLACEMENT = margin_hinge_setting()
 MOMENTUM_DECAY = momentum_decay_setting()
+CHECKPOINT_SELECTION = checkpoint_selection_setting()
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "10"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
@@ -326,6 +328,7 @@ attack_config = AttackConfig(
     loss_formulation=LOSS_FORMULATION,
     margin_topk_fraction=MARGIN_TOPK_FRACTIONS["normal_to_abnormal"],
     step_size_schedule=STEP_SIZE_SCHEDULE,
+    checkpoint_selection=CHECKPOINT_SELECTION,
     margin_hinge_displacement=MARGIN_HINGE_DISPLACEMENT,
     momentum_decay=MOMENTUM_DECAY,
     step_size_min_ratio=STEP_SIZE_MIN_RATIO,
@@ -444,6 +447,7 @@ for source_dataset in SOURCE_DATASETS:
                         "normal_target_center_x": NORMAL_TARGET_CENTER_X,
                         "normal_target_center_y": NORMAL_TARGET_CENTER_Y,
                         "step_size_schedule": STEP_SIZE_SCHEDULE,
+                        "checkpoint_selection": CHECKPOINT_SELECTION,
                         "momentum_decay": MOMENTUM_DECAY,
                         "margin_hinge_displacement": (
                             MARGIN_HINGE_DISPLACEMENT

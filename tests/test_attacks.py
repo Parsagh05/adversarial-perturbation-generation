@@ -710,3 +710,91 @@ class MomentumTests(unittest.TestCase):
             with self.subTest(decay=bad):
                 with self.assertRaisesRegex(ValueError, "momentum_decay"):
                     AttackConfig(momentum_decay=bad)
+
+
+class CheckpointSelectionTests(unittest.TestCase):
+    """best keeps the lowest-scoring iterate; final keeps the last step.
+
+    The universal-attack papers return the final iterate and do no checkpoint
+    selection; best-iterate selection is the per-image convention. The two
+    modes share an identical trajectory, so only the retained point differs.
+    """
+
+    def _samples(self):
+        return [_Sample("object", 0.2), _Sample("object", 0.5)]
+
+    def _run(self, selection: str):
+        attacker = TargetedPGD(
+            _DifferentiableFakeSurrogate(),
+            AttackConfig(
+                temperature=1.0,
+                image_size=2,
+                epsilon=0.2,
+                step_size=0.1,
+                universal_steps=6,
+                universal_batch_size=2,
+                diagnostic_interval=1,
+                seed=7,
+                random_start=False,
+                checkpoint_selection=selection,
+            ),
+        )
+        return attacker.optimize_universal(
+            self._samples(),
+            lambda s: torch.full((3, 2, 2), float(s.value)),
+            target_label=1,
+            mode="global",
+        )
+
+    def test_the_trajectory_is_identical_in_both_modes(self) -> None:
+        best = self._run("best")
+        final = self._run("final")
+        self.assertEqual(len(best.history), len(final.history))
+        for left, right in zip(best.history, final.history):
+            self.assertAlmostEqual(
+                left["total_loss"], right["total_loss"], places=6
+            )
+            self.assertAlmostEqual(
+                left["pre_update_total_loss"],
+                right["pre_update_total_loss"],
+                places=6,
+            )
+
+    def test_final_returns_the_last_step(self) -> None:
+        final = self._run("final")
+        self.assertEqual(final.selected_step, 6)
+        self.assertAlmostEqual(
+            final.selected_diagnostic_loss, final.final_losses["total"], places=6
+        )
+
+    def test_best_never_returns_something_worse_than_clean(self) -> None:
+        best = self._run("best")
+        self.assertLessEqual(
+            best.selected_diagnostic_loss, best.initial_losses["total"] + 1e-9
+        )
+
+    def test_the_default_is_best(self) -> None:
+        from adversarial_harness.config import AttackConfig as Config
+
+        self.assertEqual(Config().checkpoint_selection, "best")
+
+    def test_the_per_image_path_takes_the_same_switch(self) -> None:
+        images = torch.full((2, 3, 2, 2), 0.4)
+        results = {}
+        for selection in ("best", "final"):
+            attacker = TargetedPGD(
+                _DifferentiableFakeSurrogate(),
+                AttackConfig(
+                    temperature=1.0, epsilon=0.2, step_size=0.15, steps=5,
+                    random_start=False, checkpoint_selection=selection,
+                ),
+            )
+            _, delta = attacker.perturb_batch(
+                images, ["object", "object"], 1, "global"
+            )
+            results[selection] = delta
+        self.assertEqual(results["best"].shape, results["final"].shape)
+
+    def test_an_invalid_selection_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "checkpoint_selection"):
+            AttackConfig(checkpoint_selection="last")

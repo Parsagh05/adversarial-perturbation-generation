@@ -363,15 +363,17 @@ but no VisA image enters optimization. Per-category and per-image outputs use
 ## Optimization safeguards
 
 - Dataset-level attacks default to a T4-safe batch of 2.
-- PGD uses cosine step-size decay and smaller initial steps.
+- PGD uses a flat step size by default; see [The step size is flat by default](#the-step-size-is-flat-by-default).
 - The complete selected attack-training set is evaluated periodically. Random
   batch loss is labelled separately and is never presented as a convergence
   curve.
 - Gradient norms, Linf-bound saturation, initial/final focal and Dice losses,
   and the full universal-optimization history are stored in artifact metadata.
-- The checkpoint with the lowest complete attack-training loss is saved, rather
-  than blindly saving the last stochastic iterate. The held-out evaluation
-  split is never used for checkpoint selection.
+- `CHECKPOINT_SELECTION=best`, the default, saves the iterate with the lowest
+  complete attack-training loss rather than the last stochastic one. The
+  held-out evaluation split is never used for checkpoint selection. Set
+  `final` to return the last step instead; see
+  [Which iterate is returned](#which-iterate-is-returned).
 - The unperturbed image is the baseline checkpoint in every scope, so reported
   initial losses and loss reductions are measured from `delta=0` rather than
   from the random start, and a run that never beats "no attack" is reported as
@@ -493,7 +495,7 @@ can never be filed under a name describing different parameters:
 
 ```
 epochs + epsilon + [ce_focal_dice | hinge] + [momentum] + [step_schedule]
-       + [protocol] + cross_mode + [trainNN] + [learnable_prompt]
+       + [final] + [protocol] + cross_mode + [trainNN] + [learnable_prompt]
 ```
 
 Overriding the epoch budget renames the output on its own. `SMOKE_EPOCHS=50`
@@ -611,6 +613,71 @@ off, so the comparison measures momentum alone:
 ```bash
 RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
 MOMENTUM_DECAY=0.9 RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
+```
+
+### Which iterate is returned
+
+`CHECKPOINT_SELECTION` decides which point of the optimization becomes the
+published perturbation. It does not change the optimization itself: both modes
+follow an identical trajectory and differ only in which step is kept.
+
+**`best`, the default.** Every `DIAGNOSTIC_INTERVAL` steps the current delta is
+scored over the whole attack-train cohort, and the lowest-scoring iterate is
+retained. The baseline for that comparison is the clean delta, so a run that
+never beats "no attack" returns zeros rather than a perturbation that made its
+own surrogate objective worse.
+
+**`final`.** Return the delta at the last step, with no selection.
+
+**Why `final` is offered.** Every universal-attack paper returns the final
+iterate and none performs checkpoint selection: UAP (Moosavi-Dezfooli et al.,
+CVPR 2017) algorithm 1 exits on reaching a target fooling rate, UAT
+([arXiv:1811.11304](https://arxiv.org/abs/1811.11304)) algorithm 2 is a plain
+epoch loop that updates, projects and returns, and CD-UAP
+([arXiv:2010.03300](https://arxiv.org/abs/2010.03300)) algorithm 1 iterates a
+fixed count and returns.
+
+Best-iterate selection is the **per-image** convention. APGD
+([arXiv:2003.01690](https://arxiv.org/abs/2003.01690)) tracks the best point
+and even restarts from it whenever it halves the step size, and it is cheap
+there because scoring a candidate is the forward pass already performed on the
+single target image. For a universal attack, scoring a candidate costs a pass
+over the entire cohort, which is why the universal literature skips it.
+
+So `best` is stricter than any universal baseline and closer to the per-image
+convention. That is defensible, but it is a deviation, and a reader who assumes
+UAT's algorithm 2 will assume the last iterate. The flag makes the choice
+explicit and ablatable instead of implicit.
+
+**What changes under `final`.**
+
+- **The selection bias goes away.** `best` takes an argmin over roughly
+  `universal_steps / DIAGNOSTIC_INTERVAL` candidates scored on `attack_train`,
+  while the reported metrics come from the held-out half. Nothing leaks, but
+  the selected advantage does not transfer perfectly. `final` has no such step.
+- **The silent zero-delta case goes away.** Under `best`, a run that never
+  beats clean publishes a zero perturbation, visible only as a near-zero attack
+  success rate. `final` always returns the actual endpoint of the optimization.
+- **`selected_step` becomes the last step** and `selected_diagnostic_loss`
+  becomes the diagnostic loss at that step rather than the argmin over
+  checkpoints. Both are recorded either way.
+
+**The risk.** A universal delta fluctuates from step to step, so the last
+iterate is an arbitrary draw from that fluctuation rather than a chosen point.
+An ablation should therefore report the spread across attack seeds, not only
+the mean attack strength. If `final` is noisier across seeds, that is itself a
+result.
+
+**Scope.** All four scopes, including the per-image path, which applies the
+same rule to its batch loss.
+
+**Diagnostics are unchanged.** Under `best` the periodic cohort pass is what
+selection needs; under `final` it is only logging. Whether to widen
+`DIAGNOSTIC_INTERVAL` or drop those passes to save the compute is a separate
+decision from the selection rule, and this flag does not make it.
+
+```bash
+CHECKPOINT_SELECTION=final RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
 ```
 
 `ATTACK_TRAIN_FRACTION` is folded in the same way: any value below 1.00 adds a

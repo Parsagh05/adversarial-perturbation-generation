@@ -536,3 +536,48 @@ class MomentumIdTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MOMENTUM_DECAY": "1.5"}):
             with self.assertRaises(ValueError):
                 momentum_decay_setting()
+
+
+class CheckpointSelectionIdTests(unittest.TestCase):
+    """The retained iterate changes the artifact, so it names the output."""
+
+    def _setup(self):
+        return SETUPS[f"{BASE}_eps4"]
+
+    def test_best_is_the_default_and_adds_nothing(self) -> None:
+        self.assertEqual(effective_setup_id(self._setup()), f"{BASE}_eps4")
+
+    def test_final_names_itself(self) -> None:
+        self.assertEqual(
+            effective_setup_id(
+                self._setup(), None, 1.0, "balanced", None, "constant", None,
+                0.0, "final",
+            ),
+            f"{BASE}_eps4_final",
+        )
+
+    def test_it_composes_with_the_other_switches(self) -> None:
+        derived = effective_setup_id(
+            self._setup(), None, 1.0, "balanced", None, "constant", 0.25, 0.9,
+            "final",
+        )
+        self.assertEqual(derived, f"{BASE}_eps4_hinge0p25_mom0p9_final")
+
+    def test_unknown_selections_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "checkpoint_selection"):
+            effective_setup_id(
+                self._setup(), None, 1.0, "balanced", None, "constant", None,
+                0.0, "last",
+            )
+
+    def test_the_environment_setting_defaults_to_best(self) -> None:
+        from setup_catalog import checkpoint_selection_setting
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CHECKPOINT_SELECTION", None)
+            self.assertEqual(checkpoint_selection_setting(), "best")
+        with mock.patch.dict(os.environ, {"CHECKPOINT_SELECTION": "FINAL"}):
+            self.assertEqual(checkpoint_selection_setting(), "final")
+        with mock.patch.dict(os.environ, {"CHECKPOINT_SELECTION": "last"}):
+            with self.assertRaises(ValueError):
+                checkpoint_selection_setting()

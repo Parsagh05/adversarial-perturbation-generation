@@ -45,7 +45,7 @@ SETUP_ID = os.environ["SETUP_ID"]
 if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
-from setup_catalog import derive_steps
+from setup_catalog import checkpoint_selection_setting, derive_steps
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import MVTecSample, discover_anomaly_datasets, load_image_tensor, load_mask
@@ -137,6 +137,7 @@ NORMAL_TARGET_REGION_FRACTION = float(os.environ.get("NORMAL_TARGET_REGION_FRACT
 NORMAL_TARGET_CENTER_X = float(os.environ.get("NORMAL_TARGET_CENTER_X", "0.5"))
 NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
 STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "constant")
+CHECKPOINT_SELECTION = checkpoint_selection_setting()
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "8"))
 EVALUATION_FRACTION = float(os.environ.get("PER_IMAGE_EVALUATION_FRACTION", "1.0"))
@@ -385,6 +386,7 @@ attack_config = AttackConfig(
     loss_formulation=LOSS_FORMULATION,
     margin_topk_fraction=MARGIN_TOPK_FRACTIONS["normal_to_abnormal"],
     step_size_schedule=STEP_SIZE_SCHEDULE,
+    checkpoint_selection=CHECKPOINT_SELECTION,
     step_size_min_ratio=STEP_SIZE_MIN_RATIO,
     diagnostic_interval=DIAGNOSTIC_INTERVAL,
     feature_layers=(6, 12, 18, 24),
@@ -487,6 +489,7 @@ for dataset_name in DATASETS:
                         "normal_target_center_x": NORMAL_TARGET_CENTER_X,
                         "normal_target_center_y": NORMAL_TARGET_CENTER_Y,
                         "step_size_schedule": STEP_SIZE_SCHEDULE,
+                        "checkpoint_selection": CHECKPOINT_SELECTION,
                         "step_size_min_ratio": STEP_SIZE_MIN_RATIO,
                     }
                     expected.update(surrogate.prompt_provenance)

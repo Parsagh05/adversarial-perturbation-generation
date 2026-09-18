@@ -14,6 +14,7 @@ export ATTACK_TRAIN_FRACTION
 export FULL_DATA_CROSS="${FULL_DATA_CROSS:-true}"
 export MARGIN_HINGE_DISPLACEMENT="${MARGIN_HINGE_DISPLACEMENT:-}"
 export MOMENTUM_DECAY="${MOMENTUM_DECAY:-}"
+export CHECKPOINT_SELECTION="${CHECKPOINT_SELECTION:-best}"
 export PER_IMAGE_EFFECTIVE_BATCH_SIZE="$PER_IMAGE_BATCH_SIZE"
 export PER_IMAGE_MICRO_BATCH_SIZE="$PER_IMAGE_BATCH_SIZE"
 export DIRECTIONS="${DIRECTIONS:-normal_to_abnormal,abnormal_to_normal}"
@@ -96,6 +97,7 @@ from setup_catalog import (
     SETUPS,
     effective_setup_id,
     full_data_cross_setting,
+    checkpoint_selection_setting,
     margin_hinge_setting,
     momentum_decay_setting,
     split_protocol_setting,
@@ -112,6 +114,7 @@ full_data_cross = full_data_cross_setting()
 schedule = step_size_schedule_setting()
 hinge = margin_hinge_setting()
 momentum = momentum_decay_setting()
+selection = checkpoint_selection_setting()
 produced = {}
 for setup_id, setup in SETUPS.items():
     # A smoke override collapses every scope onto one count.
@@ -120,7 +123,7 @@ for setup_id, setup in SETUPS.items():
     image_epochs = setup.image_epochs if override is None else override
     effective = effective_setup_id(
         setup, override, fraction, protocol, full_data_cross, schedule, hinge,
-        momentum,
+        momentum, selection,
     )
     if effective in produced:
         # A single step override collapses every step count onto one name, so

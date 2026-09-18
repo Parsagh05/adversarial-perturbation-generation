@@ -50,6 +50,7 @@ from setup_catalog import (
     derive_steps,
     margin_hinge_setting,
     momentum_decay_setting,
+    checkpoint_selection_setting,
 )
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
@@ -144,6 +145,7 @@ NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
 STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "constant")
 MARGIN_HINGE_DISPLACEMENT = margin_hinge_setting()
 MOMENTUM_DECAY = momentum_decay_setting()
+CHECKPOINT_SELECTION = checkpoint_selection_setting()
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "8"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
@@ -438,16 +440,23 @@ def optimize_accumulated(
                 print("CUDA OOM: micro-batch reduced to", micro_batch_size)
                 release_cuda()
 
+    # Same switch as optimize_universal: the trajectory above is unchanged and
+    # only the retained point differs.
+    if attacker.config.checkpoint_selection == "final":
+        selected = delta.detach()
+        selected_step = total_steps
+    else:
+        selected = best_delta.detach()
     final_losses = attacker._diagnostic_losses(
         diagnostic_samples,
         image_loader,
-        best_delta,
+        selected,
         target_label,
         loss_mode,
         mask_loader=mask_fn,
     )
     return AccumulatedResult(
-        delta=best_delta.detach(),
+        delta=selected,
         actual_micro_batch_size=micro_batch_size,
         gradient_accumulation_steps=math.ceil(EFFECTIVE_BATCH_SIZE / micro_batch_size),
         history=history,
@@ -455,7 +464,11 @@ def optimize_accumulated(
         final_losses=final_losses,
         diagnostic_sample_ids=diagnostic_sample_ids,
         selected_step=selected_step,
-        selected_diagnostic_loss=best_diagnostic_loss,
+        selected_diagnostic_loss=(
+            final_losses["total"]
+            if attacker.config.checkpoint_selection == "final"
+            else best_diagnostic_loss
+        ),
     )
 
 def artifact_path(dataset: str, category: str, fraction: float, direction: str, loss_mode: str):
@@ -495,6 +508,7 @@ attack_config = AttackConfig(
     loss_formulation=LOSS_FORMULATION,
     margin_topk_fraction=MARGIN_TOPK_FRACTIONS["normal_to_abnormal"],
     step_size_schedule=STEP_SIZE_SCHEDULE,
+    checkpoint_selection=CHECKPOINT_SELECTION,
     margin_hinge_displacement=MARGIN_HINGE_DISPLACEMENT,
     momentum_decay=MOMENTUM_DECAY,
     step_size_min_ratio=STEP_SIZE_MIN_RATIO,
@@ -625,6 +639,7 @@ for dataset_name in DATASETS:
                             "normal_target_center_x": NORMAL_TARGET_CENTER_X,
                             "normal_target_center_y": NORMAL_TARGET_CENTER_Y,
                             "step_size_schedule": STEP_SIZE_SCHEDULE,
+                        "checkpoint_selection": CHECKPOINT_SELECTION,
                         "momentum_decay": MOMENTUM_DECAY,
                         "margin_hinge_displacement": (
                             MARGIN_HINGE_DISPLACEMENT

@@ -578,9 +578,14 @@ class TargetedPGD:
         if final_loss < best_loss:
             best_loss = final_loss
             best_delta = delta.detach().clone()
+        selected = (
+            delta.detach()
+            if self.config.checkpoint_selection == "final"
+            else best_delta
+        )
         return (
-            (clean + best_delta).clamp(0.0, 1.0).detach(),
-            best_delta.detach(),
+            (clean + selected).clamp(0.0, 1.0).detach(),
+            selected.detach(),
         )
 
     def optimize_universal(
@@ -795,22 +800,35 @@ class TargetedPGD:
             history.append(step_record)
             if progress is not None:
                 progress(step + 1, self.config.universal_steps, step_record)
+        # The trajectory above is identical either way; only the retained
+        # point differs. "final" returns the last step, as the universal-attack
+        # papers do, and reports the diagnostic loss of that step rather than
+        # the argmin over the checkpoints.
+        if self.config.checkpoint_selection == "final":
+            selected = delta.detach()
+            selected_step = self.config.universal_steps
+        else:
+            selected = best_delta.detach()
         final_losses = self._diagnostic_losses(
             diagnostic_samples,
             image_loader,
-            best_delta,
+            selected,
             target_label,
             mode,
             mask_loader=mask_loader,
         )
         return UniversalAttackResult(
-            delta=best_delta.detach(),
+            delta=selected,
             history=history,
             initial_losses=initial_losses,
             final_losses=final_losses,
             diagnostic_sample_ids=diagnostic_ids,
             selected_step=selected_step,
-            selected_diagnostic_loss=best_diagnostic_loss,
+            selected_diagnostic_loss=(
+                final_losses["total"]
+                if self.config.checkpoint_selection == "final"
+                else best_diagnostic_loss
+            ),
         )
 
     def _diagnostic_losses(

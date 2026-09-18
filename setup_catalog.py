@@ -174,6 +174,32 @@ def momentum_decay_setting() -> float:
     return value
 
 
+CHECKPOINT_SELECTIONS = ("best", "final")
+
+
+def _selection_tag(checkpoint_selection: str) -> str:
+    """``""`` for the retained best iterate, ``final`` for the last step."""
+
+    if checkpoint_selection not in CHECKPOINT_SELECTIONS:
+        raise ValueError(
+            f"checkpoint_selection must be one of {CHECKPOINT_SELECTIONS}, got "
+            f"{checkpoint_selection!r}"
+        )
+    return "" if checkpoint_selection == "best" else "final"
+
+
+def checkpoint_selection_setting() -> str:
+    """``best`` keeps the lowest-scoring iterate; ``final`` keeps the last."""
+
+    selection = os.environ.get("CHECKPOINT_SELECTION", "best").strip().lower()
+    if selection not in CHECKPOINT_SELECTIONS:
+        raise ValueError(
+            f"CHECKPOINT_SELECTION must be one of {CHECKPOINT_SELECTIONS}, got "
+            f"{selection!r}"
+        )
+    return selection
+
+
 def _epoch_number(value: float) -> str:
     """``7.14`` -> ``7p14``; keeps fractional budgets filesystem-safe."""
 
@@ -205,6 +231,7 @@ def compose_setup_id(
     step_size_schedule: str = "constant",
     margin_hinge_displacement: float | None = None,
     momentum_decay: float = 0.0,
+    checkpoint_selection: str = "best",
 ) -> str:
     """Build the canonical ID for one effective configuration.
 
@@ -233,6 +260,9 @@ def compose_setup_id(
     schedule = _schedule_tag(step_size_schedule)
     if schedule:
         parts.append(schedule)
+    selection = _selection_tag(checkpoint_selection)
+    if selection:
+        parts.append(selection)
     protocol = _protocol_tag(split_protocol)
     if protocol:
         parts.append(protocol)
@@ -255,6 +285,7 @@ def effective_setup_id(
     step_size_schedule: str = "constant",
     margin_hinge_displacement: float | None = None,
     momentum_decay: float = 0.0,
+    checkpoint_selection: str = "best",
 ) -> str:
     """Canonical ID for a catalog entry after any epoch/fraction override.
 
@@ -274,6 +305,7 @@ def effective_setup_id(
         step_size_schedule,
         margin_hinge_displacement,
         momentum_decay,
+        checkpoint_selection,
     )
 
 
