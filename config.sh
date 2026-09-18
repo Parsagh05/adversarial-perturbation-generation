@@ -84,8 +84,9 @@ GPU="${GPU:-0}"
 IMAGE_SIZE="${IMAGE_SIZE:-518}"
 ATTACK_SEED="${ATTACK_SEED:-111}"
 
-# Initial PGD step size, shared by every scope and decayed by
-# STEP_SIZE_SCHEDULE. Step counts are derived per scope; see SETUP_EPOCHS above.
+# PGD step size, shared by every scope. Flat unless STEP_SIZE_SCHEDULE decays
+# it. 0.25/255 is eps/16 at eps=4/255; UAT uses eps/8, which would be 0.5/255.
+# Step counts are derived per scope; see SETUP_EPOCHS above.
 INITIAL_STEP_SIZE="${INITIAL_STEP_SIZE:-0.25/255}"
 
 # Fast plumbing check. Smoke outputs are not benchmark results.
@@ -149,12 +150,13 @@ PROMPT_TRAINING_BRANCH="${PROMPT_TRAINING_BRANCH:-main}"
 PROMPT_TRAINING_EPOCHS="${PROMPT_TRAINING_EPOCHS:-15}"
 PROMPT_TRAINING_BATCH_SIZE="${PROMPT_TRAINING_BATCH_SIZE:-2}"
 
-# Decay prevents a sign-PGD iterate from bouncing indefinitely on the Linf
-# boundary: the update is +-step_size regardless of gradient magnitude, so a
-# constant step can never settle. constant, cosine or linear; both decaying
-# schedules end at STEP_SIZE_MIN_RATIO and cover the same total distance,
-# cosine simply holds the large step longer. linear is the default.
-STEP_SIZE_SCHEDULE="${STEP_SIZE_SCHEDULE:-linear}"
+# constant, linear or cosine. constant is the default and matches the
+# universal-attack literature: UAP, UAT and CD-UAP use no budget-normalised
+# decay. It also keeps a run sliceable -- a decaying step depends on the total
+# step count, so the first N steps of a long run differ from an N-step run,
+# whereas with a flat step they are identical. The decaying schedules end at
+# STEP_SIZE_MIN_RATIO and name themselves in the setup ID.
+STEP_SIZE_SCHEDULE="${STEP_SIZE_SCHEDULE:-constant}"
 STEP_SIZE_MIN_RATIO="${STEP_SIZE_MIN_RATIO:-0.1}"
 # The full selected attack-training set is used for checkpoint selection.
 # Evaluate it periodically because a full pass after every PGD update is costly.

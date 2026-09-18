@@ -95,6 +95,7 @@ from setup_catalog import (
     effective_setup_id,
     full_data_cross_setting,
     split_protocol_setting,
+    step_size_schedule_setting,
 )
 
 # The effective epoch budget and train fraction are known before any setup runs,
@@ -104,6 +105,7 @@ override = float(os.environ["SMOKE_EPOCHS"]) if smoke else None
 fraction = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 protocol = split_protocol_setting()
 full_data_cross = full_data_cross_setting()
+schedule = step_size_schedule_setting()
 produced = {}
 for setup_id, setup in SETUPS.items():
     # A smoke override collapses every scope onto one count.
@@ -111,7 +113,7 @@ for setup_id, setup in SETUPS.items():
     category_epochs = setup.category_epochs if override is None else override
     image_epochs = setup.image_epochs if override is None else override
     effective = effective_setup_id(
-        setup, override, fraction, protocol, full_data_cross
+        setup, override, fraction, protocol, full_data_cross, schedule
     )
     if effective in produced:
         # A single step override collapses every step count onto one name, so

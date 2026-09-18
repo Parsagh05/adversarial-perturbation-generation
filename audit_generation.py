@@ -21,6 +21,7 @@ from setup_catalog import (
     effective_setup_id,
     full_data_cross_setting,
     split_protocol_setting,
+    step_size_schedule_setting,
 )
 
 
@@ -42,6 +43,7 @@ EXPECTED_ATTACK_SEED = int(os.environ.get("ATTACK_SEED", "111"))
 ATTACK_TRAIN_FRACTION = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 SPLIT_PROTOCOL = split_protocol_setting()
 FULL_DATA_CROSS = full_data_cross_setting()
+STEP_SIZE_SCHEDULE = step_size_schedule_setting()
 CROSS_DATASET_FULL_SOURCE = FULL_DATA_CROSS
 # Read the same way the runners read it, so auditing a run that generated one
 # direction checks for that direction instead of reporting the other missing.
@@ -346,6 +348,13 @@ def audit_scope(
         ).all():
             raise RuntimeError(f"Prompt/source dataset mismatch in {manifest_path}")
 
+    if "step_size_schedule" in manifest.columns:
+        recorded_schedules = set(manifest.step_size_schedule.astype(str))
+        if recorded_schedules != {STEP_SIZE_SCHEDULE}:
+            raise RuntimeError(
+                f"Wrong step-size schedule in {manifest_path}: expected "
+                f"{STEP_SIZE_SCHEDULE}, found {sorted(recorded_schedules)}"
+            )
     if "split_protocol" not in manifest.columns:
         raise RuntimeError(f"Missing split-protocol provenance in {manifest_path}")
     if set(manifest.split_protocol.astype(str)) != {SPLIT_PROTOCOL}:
@@ -436,7 +445,7 @@ def main() -> None:
         # Same derivation as train.sh, so the audit looks where the run wrote.
         effective_id = effective_setup_id(
             setup, SMOKE_EPOCHS if SMOKE else None, ATTACK_TRAIN_FRACTION,
-            SPLIT_PROTOCOL, FULL_DATA_CROSS,
+            SPLIT_PROTOCOL, FULL_DATA_CROSS, STEP_SIZE_SCHEDULE,
         )
         expected_cross_tag = "_fullcross" if FULL_DATA_CROSS else "_halfcross"
         other_cross_tag = "_halfcross" if FULL_DATA_CROSS else "_fullcross"

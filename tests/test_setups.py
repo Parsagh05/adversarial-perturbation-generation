@@ -378,3 +378,64 @@ class SplitProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StepSizeScheduleIdTests(unittest.TestCase):
+    """The step-size schedule changes the perturbation, so it names the output.
+
+    A decaying step depends on the total step count, so the first N steps of a
+    long run are not an N-step run. constant removes that coupling, which is
+    what makes one long run sliceable into shorter budgets.
+    """
+
+    def _setup(self):
+        return SETUPS[f"{BASE}_eps4"]
+
+    def test_constant_is_the_default_and_adds_nothing(self) -> None:
+        setup = self._setup()
+        self.assertEqual(effective_setup_id(setup), f"{BASE}_eps4")
+        self.assertEqual(
+            effective_setup_id(setup, None, 1.0, "balanced", None, "constant"),
+            f"{BASE}_eps4",
+        )
+
+    def test_decaying_schedules_name_themselves(self) -> None:
+        setup = self._setup()
+        self.assertEqual(
+            effective_setup_id(setup, None, 1.0, "balanced", None, "linear"),
+            f"{BASE}_eps4_linear_step",
+        )
+        self.assertEqual(
+            effective_setup_id(setup, None, 1.0, "balanced", None, "cosine"),
+            f"{BASE}_eps4_cosine_step",
+        )
+
+    def test_schedules_never_share_a_name(self) -> None:
+        setup = self._setup()
+        names = {
+            effective_setup_id(setup, None, 0.2, "full", True, schedule)
+            for schedule in ("constant", "linear", "cosine")
+        }
+        self.assertEqual(len(names), 3)
+
+    def test_learnable_prompt_stays_last(self) -> None:
+        setup = SETUPS[f"{BASE}_eps4_learnable_prompt"]
+        derived = effective_setup_id(setup, None, 1.0, "full", True, "linear")
+        self.assertTrue(derived.endswith("_learnable_prompt"))
+        self.assertIn("_linear_step_", derived)
+
+    def test_unknown_schedules_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "step_size_schedule"):
+            effective_setup_id(self._setup(), None, 1.0, "balanced", None, "sqrt")
+
+    def test_the_environment_setting_defaults_to_constant(self) -> None:
+        from setup_catalog import step_size_schedule_setting
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("STEP_SIZE_SCHEDULE", None)
+            self.assertEqual(step_size_schedule_setting(), "constant")
+        with mock.patch.dict(os.environ, {"STEP_SIZE_SCHEDULE": "LINEAR"}):
+            self.assertEqual(step_size_schedule_setting(), "linear")
+        with mock.patch.dict(os.environ, {"STEP_SIZE_SCHEDULE": "sqrt"}):
+            with self.assertRaises(ValueError):
+                step_size_schedule_setting()

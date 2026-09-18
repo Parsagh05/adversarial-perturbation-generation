@@ -399,7 +399,8 @@ A setup ID is a pure function of the settings that change the work, so a run
 can never be filed under a name describing different parameters:
 
 ```
-epochs + epsilon + [ce_focal_dice] + [protocol] + cross_mode + [trainNN] + [learnable_prompt]
+epochs + epsilon + [ce_focal_dice] + [step_schedule] + [protocol] + cross_mode
+       + [trainNN] + [learnable_prompt]
 ```
 
 Overriding the epoch budget renames the output on its own. `SMOKE_EPOCHS=50`
@@ -409,6 +410,29 @@ and `audit_generation.py` applies the same derivation, so it looks where the
 run actually wrote. When an override makes two catalog rows resolve to
 the same name, the launcher keeps the first and reports the collapse instead
 of letting them overwrite each other.
+
+### The step size is flat by default
+
+`STEP_SIZE_SCHEDULE` is `constant`: one step size for the whole run. The
+decaying schedules remain available as `linear` and `cosine`, and each names
+itself in the setup ID (`..._linear_step`), because the schedule changes the
+perturbation.
+
+Two reasons for the default. The universal-attack literature does not use a
+budget-normalised schedule -- UAP, UAT and CD-UAP either decay not at all or
+delegate adaptation to Adam -- and decay was inherited from the per-image
+setting. More practically, a decaying step depends on the total step count, so
+the first N steps of a long run are not an N-step run: six epochs into a
+twenty-epoch run the steps are still far larger than a finished six-epoch run's.
+With a flat step the two are identical, because the initial perturbation and the
+batch order depend only on `ATTACK_SEED` and not on the budget. One long run can
+then stand in for several shorter ones, given delta snapshots at epoch
+boundaries, which are not implemented yet.
+
+`INITIAL_STEP_SIZE` stays `0.25/255`, which is epsilon/16 at epsilon 4/255. UAT
+uses epsilon/8, so `0.5/255` is the literature-matching alternative. The step
+size is recorded in every manifest but is not part of the setup ID, so sweeping
+it needs a separate output tree.
 
 `ATTACK_TRAIN_FRACTION` is folded in the same way: any value below 1.00 adds a
 `_trainNN` component, so a 20% run lands in `..._train20` and cannot overwrite

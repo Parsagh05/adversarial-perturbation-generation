@@ -92,6 +92,40 @@ def full_data_cross_setting() -> bool:
     return raw == "true"
 
 
+# Mirrors VALID_STEP_SIZE_SCHEDULES in adversarial_harness.config. Declared
+# here too so the launcher can derive names without importing the attack code,
+# the same way SPLIT_PROTOCOLS is declared in both places.
+STEP_SIZE_SCHEDULES = ("constant", "linear", "cosine")
+
+
+def _schedule_tag(step_size_schedule: str) -> str:
+    """``""`` for the default flat step, ``linear_step`` / ``cosine_step`` else.
+
+    A decaying step size depends on the total step count, so the first N steps
+    of a long run differ from an N-step run. constant keeps them identical,
+    which is what lets one long run be sliced into shorter budgets.
+    """
+
+    if step_size_schedule not in STEP_SIZE_SCHEDULES:
+        raise ValueError(
+            f"step_size_schedule must be one of {STEP_SIZE_SCHEDULES}, got "
+            f"{step_size_schedule!r}"
+        )
+    return "" if step_size_schedule == "constant" else f"{step_size_schedule}_step"
+
+
+def step_size_schedule_setting() -> str:
+    """Flat step by default; the decaying schedules name themselves."""
+
+    schedule = os.environ.get("STEP_SIZE_SCHEDULE", "constant").strip().lower()
+    if schedule not in STEP_SIZE_SCHEDULES:
+        raise ValueError(
+            f"STEP_SIZE_SCHEDULE must be one of {STEP_SIZE_SCHEDULES}, got "
+            f"{schedule!r}"
+        )
+    return schedule
+
+
 def _epoch_number(value: float) -> str:
     """``7.14`` -> ``7p14``; keeps fractional budgets filesystem-safe."""
 
@@ -120,6 +154,7 @@ def compose_setup_id(
     attack_train_fraction: float = 1.0,
     split_protocol: str = "balanced",
     full_data_cross: bool | None = None,
+    step_size_schedule: str = "constant",
 ) -> str:
     """Build the canonical ID for one effective configuration.
 
@@ -136,6 +171,9 @@ def compose_setup_id(
     # itself, so switching back to it cannot overwrite a default-loss run.
     if loss_formulation == "ce_focal_dice":
         parts.append("ce_focal_dice")
+    schedule = _schedule_tag(step_size_schedule)
+    if schedule:
+        parts.append(schedule)
     protocol = _protocol_tag(split_protocol)
     if protocol:
         parts.append(protocol)
@@ -155,6 +193,7 @@ def effective_setup_id(
     attack_train_fraction: float = 1.0,
     split_protocol: str = "balanced",
     full_data_cross: bool | None = None,
+    step_size_schedule: str = "constant",
 ) -> str:
     """Canonical ID for a catalog entry after any epoch/fraction override.
 
@@ -171,6 +210,7 @@ def effective_setup_id(
         attack_train_fraction,
         split_protocol,
         full_data_cross,
+        step_size_schedule,
     )
 
 
