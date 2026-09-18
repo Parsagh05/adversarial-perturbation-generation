@@ -57,13 +57,22 @@ class TargetedPGD:
     ) -> Dict[str, torch.Tensor]:
         if mode not in VALID_LOSS_MODES:
             raise ValueError(f"Unknown loss mode: {mode}")
+        # Images are grouped by category because each category has its own text
+        # prompt bank and cannot share one logit computation. The grouping is a
+        # mechanical necessity, not a weighting: every group accumulates the
+        # SUM of its per-image losses and the total is divided by the batch
+        # size, so each image counts exactly once no matter how many of its
+        # category were drawn. Averaging the per-category means instead made an
+        # image's weight depend on its category's share of the batch, which is
+        # not the unbiased minibatch estimate a stochastic universal attack
+        # assumes (Shafahi et al. 1811.11304 Alg. 2; CD-UAP 2010.03300 Alg. 1).
+        batch_size = len(categories)
         total_global = global_features.new_zeros(())
         total_local = global_features.new_zeros(())
         total_local_focal = global_features.new_zeros(())
         total_local_dice = global_features.new_zeros(())
         total_global_margin = global_features.new_zeros(())
         total_local_topk = global_features.new_zeros(())
-        group_count = 0
 
         for category in sorted(set(categories)):
             indices = [
@@ -85,13 +94,13 @@ class TargetedPGD:
                 )
                 if self.config.loss_formulation == "margin_topk":
                     global_margin = global_logits[:, 1] - global_logits[:, 0]
-                    raw_global_margin = global_margin.mean()
+                    raw_global_margin = global_margin.sum()
                     direction_sign = -1.0 if target_label == 1 else 1.0
                     total_global = total_global + direction_sign * raw_global_margin
                     total_global_margin = total_global_margin + raw_global_margin
                 else:
                     total_global = total_global + F.cross_entropy(
-                        global_logits, target
+                        global_logits, target, reduction="sum"
                     )
 
             if mode in {"local", "combined"}:
@@ -206,8 +215,8 @@ class TargetedPGD:
                         + self.config.local_dice_smooth
                     )
                     per_image_dice = 1.0 - dice_numerator / dice_denominator
-                    focal_loss = per_image_focal.mean()
-                    dice_loss = per_image_dice.mean()
+                    focal_loss = per_image_focal.sum()
+                    dice_loss = per_image_dice.sum()
                     layer_focal_losses.append(focal_loss)
                     layer_dice_losses.append(dice_loss)
                     layer_losses.append(
@@ -230,7 +239,7 @@ class TargetedPGD:
                     )
                     topk_value = anomaly_map.topk(
                         topk_count, dim=1, largest=True, sorted=False
-                    ).values.mean()
+                    ).values.mean(dim=1).sum()
                     direction_sign = -1.0 if target_label == 1 else 1.0
                     total_local = total_local + direction_sign * topk_value
                     total_local_topk = total_local_topk + topk_value
@@ -244,22 +253,21 @@ class TargetedPGD:
                     total_local_dice = (
                         total_local_dice + torch.stack(layer_dice_losses).mean()
                     )
-            group_count += 1
 
         result: Dict[str, torch.Tensor] = {}
         if mode in {"global", "combined"}:
-            result["global"] = total_global / group_count
+            result["global"] = total_global / batch_size
             if self.config.loss_formulation == "margin_topk":
-                result["global_margin"] = total_global_margin / group_count
+                result["global_margin"] = total_global_margin / batch_size
         if mode in {"local", "combined"}:
-            result["local"] = total_local / group_count
+            result["local"] = total_local / batch_size
             if self.config.loss_formulation == "margin_topk":
-                result["local_topk"] = total_local_topk / group_count
+                result["local_topk"] = total_local_topk / batch_size
             else:
                 # These components are diagnostics; ``local`` is the weighted
                 # segmentation-aware objective used for optimization.
-                result["local_focal"] = total_local_focal / group_count
-                result["local_dice"] = total_local_dice / group_count
+                result["local_focal"] = total_local_focal / batch_size
+                result["local_dice"] = total_local_dice / batch_size
         if mode == "global":
             result["total"] = result["global"]
         elif mode == "local":

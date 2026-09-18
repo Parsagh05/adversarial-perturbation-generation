@@ -380,3 +380,121 @@ class AuditDirectionExpectationTests(unittest.TestCase):
     def test_rejects_an_unknown_direction(self) -> None:
         with self.assertRaises(ValueError):
             self._audit(DIRECTIONS="normal_to_abnormal,sideways")
+
+
+class _MultiCategorySurrogate:
+    """Two prompt banks, so a batch splits into unequal category groups."""
+
+    device = torch.device("cpu")
+
+    def __init__(self) -> None:
+        self.prompts = {
+            "bottle": SimpleNamespace(
+                normal_embeddings=torch.tensor([[1.0, 0.0]]),
+                abnormal_embeddings=torch.tensor([[0.0, 1.0]]),
+            ),
+            "cable": SimpleNamespace(
+                normal_embeddings=torch.tensor([[0.6, 0.8]]),
+                abnormal_embeddings=torch.tensor([[-0.8, 0.6]]),
+            ),
+        }
+
+    def encode_visual(self, images_01, include_patches=True):
+        signal = images_01.mean(dim=(1, 2, 3)).clamp(0.0, 1.0)
+        token = torch.stack((1.0 - signal, signal), dim=-1)
+        cls = token[:, None, :]
+        patches = token[:, None, :].expand(-1, 4, -1)
+        return token, [torch.cat((cls, patches), dim=1)] if include_patches else []
+
+
+class ImageMeanReductionTests(unittest.TestCase):
+    """The batch loss is the plain mean over images, not a mean of group means.
+
+    Averaging the per-category means made an image's weight depend on how many
+    of its category were drawn into the batch, so the gradient was not the
+    unbiased minibatch estimate a stochastic universal attack assumes.
+    """
+
+    def _attacker(self, **settings) -> TargetedPGD:
+        return TargetedPGD(
+            _MultiCategorySurrogate(),
+            AttackConfig(temperature=1.0, **settings),
+        )
+
+    def _images(self, count: int) -> torch.Tensor:
+        steps = torch.linspace(0.1, 0.9, count)
+        return torch.stack([torch.full((3, 2, 2), float(value)) for value in steps])
+
+    def test_batch_loss_equals_the_mean_of_per_image_losses(self) -> None:
+        # Three bottles and one cable: the old form gave the cable 3x weight.
+        categories = ["bottle", "bottle", "bottle", "cable"]
+        images = self._images(len(categories))
+        for formulation in ("margin_topk", "ce_focal_dice"):
+            for mode in ("global", "local", "combined"):
+                for target_label in (0, 1):
+                    with self.subTest(
+                        formulation=formulation, mode=mode, target=target_label
+                    ):
+                        attacker = self._attacker(loss_formulation=formulation)
+                        batched = float(
+                            attacker.objective(images, categories, target_label, mode)
+                        )
+                        singles = [
+                            float(
+                                attacker.objective(
+                                    images[index : index + 1],
+                                    [category],
+                                    target_label,
+                                    mode,
+                                )
+                            )
+                            for index, category in enumerate(categories)
+                        ]
+                        self.assertAlmostEqual(
+                            batched, sum(singles) / len(singles), places=5
+                        )
+
+    def test_group_order_and_composition_do_not_move_the_loss(self) -> None:
+        # Same four images, different arrangement: a plain mean is invariant.
+        images = self._images(4)
+        attacker = self._attacker()
+        balanced = ["bottle", "cable", "bottle", "cable"]
+        skewed = ["bottle", "bottle", "bottle", "cable"]
+        by_image = {
+            category: [
+                float(
+                    attacker.objective(
+                        images[index : index + 1], [category], 1, "combined"
+                    )
+                )
+                for index in range(4)
+            ]
+            for category in ("bottle", "cable")
+        }
+        for categories in (balanced, skewed):
+            with self.subTest(categories=categories):
+                expected = sum(
+                    by_image[category][index]
+                    for index, category in enumerate(categories)
+                ) / len(categories)
+                actual = float(attacker.objective(images, categories, 1, "combined"))
+                self.assertAlmostEqual(actual, expected, places=5)
+
+    def test_a_single_category_batch_is_unchanged(self) -> None:
+        # per_category and per_image draw one category, where the two forms
+        # already coincide; their existing results must not move.
+        images = self._images(3)
+        categories = ["bottle"] * 3
+        for formulation in ("margin_topk", "ce_focal_dice"):
+            with self.subTest(formulation=formulation):
+                attacker = self._attacker(loss_formulation=formulation)
+                actual = float(attacker.objective(images, categories, 1, "combined"))
+                singles = [
+                    float(
+                        attacker.objective(
+                            images[index : index + 1], ["bottle"], 1, "combined"
+                        )
+                    )
+                    for index in range(3)
+                ]
+                self.assertAlmostEqual(actual, sum(singles) / 3, places=5)
