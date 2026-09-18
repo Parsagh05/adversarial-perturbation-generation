@@ -20,6 +20,7 @@ from setup_catalog import (
     SETUPS,
     effective_setup_id,
     full_data_cross_setting,
+    margin_hinge_setting,
     split_protocol_setting,
     step_size_schedule_setting,
 )
@@ -44,6 +45,7 @@ ATTACK_TRAIN_FRACTION = float(os.environ.get("ATTACK_TRAIN_FRACTION", "1.0"))
 SPLIT_PROTOCOL = split_protocol_setting()
 FULL_DATA_CROSS = full_data_cross_setting()
 STEP_SIZE_SCHEDULE = step_size_schedule_setting()
+MARGIN_HINGE = margin_hinge_setting()
 CROSS_DATASET_FULL_SOURCE = FULL_DATA_CROSS
 # Read the same way the runners read it, so auditing a run that generated one
 # direction checks for that direction instead of reporting the other missing.
@@ -445,7 +447,7 @@ def main() -> None:
         # Same derivation as train.sh, so the audit looks where the run wrote.
         effective_id = effective_setup_id(
             setup, SMOKE_EPOCHS if SMOKE else None, ATTACK_TRAIN_FRACTION,
-            SPLIT_PROTOCOL, FULL_DATA_CROSS, STEP_SIZE_SCHEDULE,
+            SPLIT_PROTOCOL, FULL_DATA_CROSS, STEP_SIZE_SCHEDULE, MARGIN_HINGE,
         )
         expected_cross_tag = "_fullcross" if FULL_DATA_CROSS else "_halfcross"
         other_cross_tag = "_halfcross" if FULL_DATA_CROSS else "_fullcross"

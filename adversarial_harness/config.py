@@ -59,6 +59,11 @@ class AttackConfig:
     local_dice_smooth: float = 1.0
     loss_formulation: str = "ce_focal_dice"
     margin_topk_fraction: float = 0.20
+    # Saturate an image's margin contribution once it has moved this far
+    # toward the attacked class, measured from its own unperturbed margin.
+    # None disables the hinge and keeps the unbounded margin. Only the
+    # margin_topk terms need it; focal and Dice are already bounded.
+    margin_hinge_displacement: Optional[float] = None
     step_size_schedule: str = "constant"
     step_size_min_ratio: float = 0.1
     diagnostic_interval: int = 10
@@ -133,6 +138,12 @@ class AttackConfig:
             )
         if not 0.0 < self.margin_topk_fraction <= 1.0:
             raise ValueError("margin_topk_fraction must be in (0, 1]")
+        if self.margin_hinge_displacement is not None:
+            self.margin_hinge_displacement = float(self.margin_hinge_displacement)
+            if self.margin_hinge_displacement < 0.0:
+                raise ValueError(
+                    "margin_hinge_displacement must be non-negative or None"
+                )
         self.step_size_schedule = str(self.step_size_schedule)
         if self.step_size_schedule not in VALID_STEP_SIZE_SCHEDULES:
             raise ValueError(

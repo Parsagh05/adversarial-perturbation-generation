@@ -126,6 +126,31 @@ def step_size_schedule_setting() -> str:
     return schedule
 
 
+def _hinge_tag(margin_hinge_displacement: float | None) -> str:
+    """``0.25`` -> ``"hinge0p25"``; the unhinged margin adds nothing."""
+
+    if margin_hinge_displacement is None:
+        return ""
+    value = float(margin_hinge_displacement)
+    if value < 0.0:
+        raise ValueError("margin_hinge_displacement must be non-negative or None")
+    return "hinge" + f"{value:g}".replace(".", "p")
+
+
+def margin_hinge_setting() -> float | None:
+    """Displacement past each image's clean margin, or None for no hinge."""
+
+    raw = os.environ.get("MARGIN_HINGE_DISPLACEMENT", "").strip()
+    if not raw or raw.lower() in {"none", "off", "false"}:
+        return None
+    value = float(raw)
+    if value < 0.0:
+        raise ValueError(
+            f"MARGIN_HINGE_DISPLACEMENT must be non-negative or empty, got {raw!r}"
+        )
+    return value
+
+
 def _epoch_number(value: float) -> str:
     """``7.14`` -> ``7p14``; keeps fractional budgets filesystem-safe."""
 
@@ -155,6 +180,7 @@ def compose_setup_id(
     split_protocol: str = "balanced",
     full_data_cross: bool | None = None,
     step_size_schedule: str = "constant",
+    margin_hinge_displacement: float | None = None,
 ) -> str:
     """Build the canonical ID for one effective configuration.
 
@@ -171,6 +197,12 @@ def compose_setup_id(
     # itself, so switching back to it cannot overwrite a default-loss run.
     if loss_formulation == "ce_focal_dice":
         parts.append("ce_focal_dice")
+    else:
+        # The hinge only applies to the margin terms, so it can only appear on
+        # a margin_topk setup; ce_focal_dice is already bounded.
+        hinge = _hinge_tag(margin_hinge_displacement)
+        if hinge:
+            parts.append(hinge)
     schedule = _schedule_tag(step_size_schedule)
     if schedule:
         parts.append(schedule)
@@ -194,6 +226,7 @@ def effective_setup_id(
     split_protocol: str = "balanced",
     full_data_cross: bool | None = None,
     step_size_schedule: str = "constant",
+    margin_hinge_displacement: float | None = None,
 ) -> str:
     """Canonical ID for a catalog entry after any epoch/fraction override.
 
@@ -211,6 +244,7 @@ def effective_setup_id(
         split_protocol,
         full_data_cross,
         step_size_schedule,
+        margin_hinge_displacement,
     )
 
 

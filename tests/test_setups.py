@@ -439,3 +439,55 @@ class StepSizeScheduleIdTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"STEP_SIZE_SCHEDULE": "sqrt"}):
             with self.assertRaises(ValueError):
                 step_size_schedule_setting()
+
+
+class MarginHingeIdTests(unittest.TestCase):
+    """The hinge changes the perturbation, so it names the output."""
+
+    def _setup(self, loss: str = ""):
+        return SETUPS[f"{BASE}_eps4{loss}"]
+
+    def test_no_hinge_adds_nothing(self) -> None:
+        self.assertEqual(effective_setup_id(self._setup()), f"{BASE}_eps4")
+
+    def test_each_displacement_gets_its_own_name(self) -> None:
+        names = {
+            effective_setup_id(
+                self._setup(), None, 1.0, "balanced", None, "constant", value
+            )
+            for value in (None, 0.0, 0.1, 0.25)
+        }
+        self.assertEqual(len(names), 4)
+        self.assertIn(f"{BASE}_eps4_hinge0p25", names)
+        self.assertIn(f"{BASE}_eps4_hinge0", names)
+
+    def test_the_bounded_loss_never_carries_the_tag(self) -> None:
+        # focal and Dice are bounded, so ce_focal_dice has nothing to hinge.
+        derived = effective_setup_id(
+            self._setup("_ce_focal_dice"), None, 1.0, "balanced", None,
+            "constant", 0.25,
+        )
+        self.assertNotIn("hinge", derived)
+
+    def test_learnable_prompt_stays_last(self) -> None:
+        derived = effective_setup_id(
+            SETUPS[f"{BASE}_eps4_learnable_prompt"], None, 1.0, "full", True,
+            "constant", 0.25,
+        )
+        self.assertTrue(derived.endswith("_learnable_prompt"))
+        self.assertIn("_hinge0p25_", derived)
+
+    def test_the_environment_setting_is_off_unless_asked(self) -> None:
+        from setup_catalog import margin_hinge_setting
+
+        for value in ("", "none", "off"):
+            with self.subTest(value=value):
+                with mock.patch.dict(
+                    os.environ, {"MARGIN_HINGE_DISPLACEMENT": value}
+                ):
+                    self.assertIsNone(margin_hinge_setting())
+        with mock.patch.dict(os.environ, {"MARGIN_HINGE_DISPLACEMENT": "0.25"}):
+            self.assertEqual(margin_hinge_setting(), 0.25)
+        with mock.patch.dict(os.environ, {"MARGIN_HINGE_DISPLACEMENT": "-1"}):
+            with self.assertRaises(ValueError):
+                margin_hinge_setting()

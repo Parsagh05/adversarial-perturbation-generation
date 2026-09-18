@@ -54,6 +54,8 @@ class TargetedPGD:
         target_label: int,
         mode: str,
         spatial_masks: Optional[torch.Tensor] = None,
+        hinge_floors: Optional[Dict[str, torch.Tensor]] = None,
+        return_per_sample: bool = False,
     ) -> Dict[str, torch.Tensor]:
         if mode not in VALID_LOSS_MODES:
             raise ValueError(f"Unknown loss mode: {mode}")
@@ -73,6 +75,11 @@ class TargetedPGD:
         total_local_dice = global_features.new_zeros(())
         total_global_margin = global_features.new_zeros(())
         total_local_topk = global_features.new_zeros(())
+        saturated_global = global_features.new_zeros(())
+        saturated_local = global_features.new_zeros(())
+        per_sample_global = global_features.new_zeros(batch_size)
+        per_sample_local = global_features.new_zeros(batch_size)
+        direction_sign = -1.0 if target_label == 1 else 1.0
 
         for category in sorted(set(categories)):
             indices = [
@@ -94,10 +101,14 @@ class TargetedPGD:
                 )
                 if self.config.loss_formulation == "margin_topk":
                     global_margin = global_logits[:, 1] - global_logits[:, 0]
-                    raw_global_margin = global_margin.sum()
-                    direction_sign = -1.0 if target_label == 1 else 1.0
-                    total_global = total_global + direction_sign * raw_global_margin
-                    total_global_margin = total_global_margin + raw_global_margin
+                    per_sample_global.index_copy_(0, index_tensor, global_margin)
+                    signed = direction_sign * global_margin
+                    if hinge_floors is not None:
+                        floor = hinge_floors["global"].index_select(0, index_tensor)
+                        saturated_global = saturated_global + (signed < floor).sum()
+                        signed = torch.maximum(signed, floor)
+                    total_global = total_global + signed.sum()
+                    total_global_margin = total_global_margin + global_margin.sum()
                 else:
                     total_global = total_global + F.cross_entropy(
                         global_logits, target, reduction="sum"
@@ -237,12 +248,17 @@ class TargetedPGD:
                             )),
                         ),
                     )
-                    topk_value = anomaly_map.topk(
+                    per_image_topk = anomaly_map.topk(
                         topk_count, dim=1, largest=True, sorted=False
-                    ).values.mean(dim=1).sum()
-                    direction_sign = -1.0 if target_label == 1 else 1.0
-                    total_local = total_local + direction_sign * topk_value
-                    total_local_topk = total_local_topk + topk_value
+                    ).values.mean(dim=1)
+                    per_sample_local.index_copy_(0, index_tensor, per_image_topk)
+                    signed = direction_sign * per_image_topk
+                    if hinge_floors is not None:
+                        floor = hinge_floors["local"].index_select(0, index_tensor)
+                        saturated_local = saturated_local + (signed < floor).sum()
+                        signed = torch.maximum(signed, floor)
+                    total_local = total_local + signed.sum()
+                    total_local_topk = total_local_topk + per_image_topk.sum()
                 else:
                     if not layer_losses:
                         raise RuntimeError("The surrogate returned no patch features")
@@ -277,6 +293,17 @@ class TargetedPGD:
                 self.config.global_weight * result["global"]
                 + self.config.local_weight * result["local"]
             )
+        if hinge_floors is not None:
+            # A saturated image contributes a constant, so it adds no gradient.
+            # If every image saturates the gradient is exactly zero and
+            # sign(0) = 0 freezes delta, so the fractions are recorded.
+            if mode in {"global", "combined"}:
+                result["global_saturated_fraction"] = saturated_global / batch_size
+            if mode in {"local", "combined"}:
+                result["local_saturated_fraction"] = saturated_local / batch_size
+        if return_per_sample:
+            result["per_sample_global"] = per_sample_global
+            result["per_sample_local"] = per_sample_local
         return result
 
     def step_size_at(self, step: int, total_steps: int) -> float:
@@ -296,6 +323,57 @@ class TargetedPGD:
         ) * decay
         return float(self.config.step_size * ratio)
 
+    def hinge_floors(
+        self,
+        samples: Sequence[object],
+        image_loader: Callable[[object], torch.Tensor],
+        target_label: int,
+        mode: str,
+        mask_loader: Optional[Callable[[object], torch.Tensor]] = None,
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        """Per-image floors that saturate the margin a fixed distance past clean.
+
+        The floor for image i is ``sign * clean_margin_i - displacement``, so an
+        image stops contributing gradient once it has moved ``displacement``
+        toward the attacked class *from its own unperturbed margin*. Measuring
+        the displacement rather than the absolute margin is what makes one
+        setting usable across conditions whose margins differ by an order of
+        magnitude, and across terms that already start on the attacked side.
+
+        Returns ``None`` when the hinge is disabled, costing nothing.
+        """
+
+        displacement = self.config.margin_hinge_displacement
+        if displacement is None or self.config.loss_formulation != "margin_topk":
+            return None
+        direction_sign = -1.0 if target_label == 1 else 1.0
+        batch_size = max(1, min(self.config.universal_batch_size, len(samples)))
+        clean_global = []
+        clean_local = []
+        with torch.no_grad():
+            for start in range(0, len(samples), batch_size):
+                batch = samples[start : start + batch_size]
+                images = torch.stack([image_loader(s) for s in batch]).to(self.device)
+                masks = (
+                    torch.stack([mask_loader(s) for s in batch]).to(self.device)
+                    if mask_loader is not None and mode in {"local", "combined"}
+                    else None
+                )
+                components = self.objective_components(
+                    images,
+                    [str(getattr(s, "category")) for s in batch],
+                    target_label,
+                    mode,
+                    spatial_masks=masks,
+                    return_per_sample=True,
+                )
+                clean_global.append(components["per_sample_global"].detach())
+                clean_local.append(components["per_sample_local"].detach())
+        return {
+            "global": direction_sign * torch.cat(clean_global) - displacement,
+            "local": direction_sign * torch.cat(clean_local) - displacement,
+        }
+
     def objective_components(
         self,
         images_01: torch.Tensor,
@@ -303,6 +381,8 @@ class TargetedPGD:
         target_label: int,
         mode: str,
         spatial_masks: Optional[torch.Tensor] = None,
+        hinge_floors: Optional[Dict[str, torch.Tensor]] = None,
+        return_per_sample: bool = False,
     ) -> Dict[str, torch.Tensor]:
         global_features, patch_features = self.surrogate.encode_visual(
             images_01, include_patches=mode in {"local", "combined"}
@@ -314,6 +394,8 @@ class TargetedPGD:
             target_label,
             mode,
             spatial_masks=spatial_masks,
+            hinge_floors=hinge_floors,
+            return_per_sample=return_per_sample,
         )
 
     def objective(
@@ -494,6 +576,10 @@ class TargetedPGD:
         size = self.config.image_size
         reference = image_loader(samples[0]).unsqueeze(0).to(self.device)
         delta = self._initial_delta((1, 3, size, size), reference)
+        # One pass at delta = 0; None when the hinge is off, so it costs nothing.
+        hinge_floors = self.hinge_floors(
+            samples, image_loader, target_label, mode, mask_loader=mask_loader
+        )
         order = np.arange(len(samples))
         cursor = len(order)
         diagnostic_samples = list(diagnostic_samples or samples[:1])
@@ -548,6 +634,18 @@ class TargetedPGD:
                 else None
             )
 
+            batch_floors = None
+            if hinge_floors is not None:
+                selector = torch.as_tensor(
+                    [int(index) for index in indices],
+                    device=self.device,
+                    dtype=torch.long,
+                )
+                batch_floors = {
+                    key: value.index_select(0, selector)
+                    for key, value in hinge_floors.items()
+                }
+
             delta.requires_grad_(True)
             adversarial = (clean + delta).clamp(0.0, 1.0)
             components = self.objective_components(
@@ -556,6 +654,7 @@ class TargetedPGD:
                 target_label,
                 mode,
                 spatial_masks=spatial_masks,
+                hinge_floors=batch_floors,
             )
             global_gradient_norm = float("nan")
             local_gradient_norm = float("nan")
@@ -592,6 +691,7 @@ class TargetedPGD:
                     target_label,
                     mode,
                     spatial_masks=spatial_masks,
+                    hinge_floors=batch_floors,
                 )
             diagnostic_losses: Dict[str, float] = {}
             if (
@@ -630,6 +730,16 @@ class TargetedPGD:
                     "combined_gradient_l2": float(gradient.norm().detach()),
                     "combined_gradient_linf": float(gradient.abs().max().detach()),
                     "step_size": step_size,
+                    "global_margin_saturated_fraction": float(
+                        updated_components.get(
+                            "global_saturated_fraction", torch.tensor(float("nan"))
+                        )
+                    ),
+                    "local_margin_saturated_fraction": float(
+                        updated_components.get(
+                            "local_saturated_fraction", torch.tensor(float("nan"))
+                        )
+                    ),
                     "delta_saturation_fraction": float(
                         (delta.abs() >= self.config.epsilon - 1e-7)
                         .float()

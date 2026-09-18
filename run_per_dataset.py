@@ -42,7 +42,11 @@ SETUP_ID = os.environ["SETUP_ID"]
 if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
-from setup_catalog import derive_steps, full_data_cross_setting
+from setup_catalog import (
+    derive_steps,
+    full_data_cross_setting,
+    margin_hinge_setting,
+)
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import (
@@ -131,6 +135,7 @@ NORMAL_TARGET_REGION_FRACTION = float(os.environ.get("NORMAL_TARGET_REGION_FRACT
 NORMAL_TARGET_CENTER_X = float(os.environ.get("NORMAL_TARGET_CENTER_X", "0.5"))
 NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
 STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "constant")
+MARGIN_HINGE_DISPLACEMENT = margin_hinge_setting()
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "10"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
@@ -319,6 +324,7 @@ attack_config = AttackConfig(
     loss_formulation=LOSS_FORMULATION,
     margin_topk_fraction=MARGIN_TOPK_FRACTIONS["normal_to_abnormal"],
     step_size_schedule=STEP_SIZE_SCHEDULE,
+    margin_hinge_displacement=MARGIN_HINGE_DISPLACEMENT,
     step_size_min_ratio=STEP_SIZE_MIN_RATIO,
     diagnostic_interval=DIAGNOSTIC_INTERVAL,
     feature_layers=(6, 12, 18, 24),
@@ -435,6 +441,11 @@ for source_dataset in SOURCE_DATASETS:
                         "normal_target_center_x": NORMAL_TARGET_CENTER_X,
                         "normal_target_center_y": NORMAL_TARGET_CENTER_Y,
                         "step_size_schedule": STEP_SIZE_SCHEDULE,
+                        "margin_hinge_displacement": (
+                            MARGIN_HINGE_DISPLACEMENT
+                            if MARGIN_HINGE_DISPLACEMENT is not None
+                            else ""
+                        ),
                         "step_size_min_ratio": STEP_SIZE_MIN_RATIO,
                         "diagnostic_interval": DIAGNOSTIC_INTERVAL,
                         "checkpoint_selection_partition": (

@@ -115,6 +115,14 @@ NORMAL_TARGET_CENTER_Y="${NORMAL_TARGET_CENTER_Y:-0.5}"
 
 # Relaxed loss: s(x)=z_abnormal(x)-z_normal(x) at image level and TopK(H(x))
 # at pixel level. The setup ID selects the loss; these configure K only.
+#
+# MARGIN_HINGE_DISPLACEMENT saturates an image's margin contribution once it
+# has moved this far toward the attacked class, measured from its own clean
+# margin, so an already-fooled image stops pulling the shared delta. Empty
+# disables it and keeps the unbounded margin. It applies to margin_topk only
+# and names the setup (0.25 -> _hinge0p25), so an A/B cannot collide. Pick a
+# value from the per-image margins of a completed run; see the README.
+MARGIN_HINGE_DISPLACEMENT="${MARGIN_HINGE_DISPLACEMENT:-}"
 MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL="${MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL:-0.20}"
 MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL="${MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL:-0.40}"
 

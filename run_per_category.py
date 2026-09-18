@@ -46,7 +46,7 @@ SETUP_ID = os.environ["SETUP_ID"]
 if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
-from setup_catalog import derive_steps
+from setup_catalog import derive_steps, margin_hinge_setting
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import MVTecSample, discover_anomaly_datasets, load_image_tensor, load_mask
@@ -138,6 +138,7 @@ NORMAL_TARGET_REGION_FRACTION = float(os.environ.get("NORMAL_TARGET_REGION_FRACT
 NORMAL_TARGET_CENTER_X = float(os.environ.get("NORMAL_TARGET_CENTER_X", "0.5"))
 NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
 STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "constant")
+MARGIN_HINGE_DISPLACEMENT = margin_hinge_setting()
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "8"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
@@ -280,6 +281,16 @@ def optimize_accumulated(
     delta = attacker._initial_delta((1, 3, IMAGE_SIZE, IMAGE_SIZE), reference)
     del reference
 
+    # The category delta is shared across its images, so the hinge applies
+    # here too. optimize_universal does this internally; this loop accumulates
+    # over micro-batches, so the floors are sliced per micro-batch instead.
+    hinge_floors = attacker.hinge_floors(
+        source_samples, image_loader, target_label, loss_mode, mask_loader=mask_fn
+    )
+    sample_position = {
+        sample.protocol_id: index for index, sample in enumerate(source_samples)
+    }
+
     order = np.arange(len(source_samples))
     cursor = len(order)
     rng = np.random.default_rng(run_seed)
@@ -319,10 +330,22 @@ def optimize_accumulated(
                         torch.stack([mask_fn(s) for s in micro]).to(attacker.device)
                         if mask_fn is not None and loss_mode in {"local", "combined"} else None
                     )
+                    micro_floors = None
+                    if hinge_floors is not None:
+                        selector = torch.as_tensor(
+                            [sample_position[s.protocol_id] for s in micro],
+                            device=attacker.device,
+                            dtype=torch.long,
+                        )
+                        micro_floors = {
+                            key: value.index_select(0, selector)
+                            for key, value in hinge_floors.items()
+                        }
                     with autocast_context():
                         components = attacker.objective_components(
                             (clean + delta_leaf).clamp(0, 1), categories, target_label,
                             loss_mode, spatial_masks=masks,
+                            hinge_floors=micro_floors,
                         )
                     weight = len(micro) / EFFECTIVE_BATCH_SIZE
                     pre_loss += float(components["total"].detach()) * weight
@@ -458,6 +481,7 @@ attack_config = AttackConfig(
     loss_formulation=LOSS_FORMULATION,
     margin_topk_fraction=MARGIN_TOPK_FRACTIONS["normal_to_abnormal"],
     step_size_schedule=STEP_SIZE_SCHEDULE,
+    margin_hinge_displacement=MARGIN_HINGE_DISPLACEMENT,
     step_size_min_ratio=STEP_SIZE_MIN_RATIO,
     diagnostic_interval=DIAGNOSTIC_INTERVAL,
     feature_layers=(6, 12, 18, 24),
@@ -586,6 +610,11 @@ for dataset_name in DATASETS:
                             "normal_target_center_x": NORMAL_TARGET_CENTER_X,
                             "normal_target_center_y": NORMAL_TARGET_CENTER_Y,
                             "step_size_schedule": STEP_SIZE_SCHEDULE,
+                        "margin_hinge_displacement": (
+                            MARGIN_HINGE_DISPLACEMENT
+                            if MARGIN_HINGE_DISPLACEMENT is not None
+                            else ""
+                        ),
                             "step_size_min_ratio": STEP_SIZE_MIN_RATIO,
                             "diagnostic_interval": DIAGNOSTIC_INTERVAL,
                             "checkpoint_selection_partition": "full_attack_train",

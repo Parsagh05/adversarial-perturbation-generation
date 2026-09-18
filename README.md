@@ -185,6 +185,99 @@ The default objective is:
 `MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL` defaults to 0.40. The global, local,
 and combined attack modes remain separate within every setup.
 
+### Hinging the per-image margin
+
+`MARGIN_HINGE_DISPLACEMENT` bounds how much any single image can contribute to
+a shared perturbation. It is empty by default, which leaves the margin
+unbounded and reproduces the behaviour described above.
+
+**What it does.** For image `i`, let `m_i` be its image-level margin
+`z_abnormal - z_normal`, and `m_i^clean` the same quantity at `delta = 0`.
+With `s = -1` for `normal_to_abnormal` and `s = +1` for `abnormal_to_normal`,
+the per-image contribution becomes
+
+```
+contribution_i = max( s * m_i ,  s * m_i^clean - D )
+```
+
+where `D` is `MARGIN_HINGE_DISPLACEMENT`. Below the floor the term is a
+constant, so a saturated image produces no gradient. The same floor is applied
+to the local term, using each image's mean over its TopK patch margins in place
+of `m_i`. The reported `global_margin` and `local_topk` diagnostics stay the
+raw, unhinged values so they remain comparable with earlier runs.
+
+Read plainly: an image stops pulling on the shared perturbation once it has
+moved `D` toward the attacked class **from where that image started**.
+
+**Why.** The margin is otherwise unbounded, so an image already far past the
+decision boundary keeps producing gradient and drags the shared delta toward
+over-serving samples that are already fooled, at the expense of borderline
+ones. Two universal-attack papers identify this independently:
+
+- Shafahi et al., *Universal Adversarial Training*, AAAI 2020
+  ([arXiv:1811.11304](https://arxiv.org/abs/1811.11304)), section 3, clip the
+  loss as `l_hat = min{ l(w, x_i + delta), beta }`, to "prevent any single
+  image from dominating the objective, and giving us a better surrogate of
+  misclassification accuracy". Their figure 5 ablation is the reason `D` is a
+  tunable value rather than zero: no clipping was worst, but the most
+  aggressive clipping was also worse than the middle setting.
+- Zhang and Benz et al., *CD-UAP*, AAAI 2020
+  ([arXiv:2010.03300](https://arxiv.org/abs/2010.03300)), equation 5, use a
+  bounded logit loss `L_BL = ( L_c(x+delta) - max_{i != c} L_i(x+delta) )_+`
+  with `(s)_+ = max(s, 0)`. That is a hinge on a difference of logits, which
+  is exactly the shape of the margin term here, so it is the form this
+  implementation follows.
+
+**Why displacement rather than an absolute floor.** CD-UAP hinges at the
+decision boundary, which is correct when the attacked network is the network
+being optimized. Here the margins are measured on a frozen CLIP surrogate, and
+they do not sit where an absolute floor would assume. Measured from completed
+runs, as progress toward the attacked class where positive means past the
+boundary:
+
+| setup | term | clean | converged |
+|---|---|---:|---:|
+| frozen, normal to abnormal | global | +0.01 | +0.44 |
+| frozen, abnormal to normal | local TopK | +0.12 | +0.18 |
+| learnable, normal to abnormal | global | +0.15 | +3.05 |
+| learnable, visa, normal to abnormal | local TopK | -4.74 | -3.78 |
+
+A floor at the boundary would saturate every image of the abnormal-to-normal
+local term at step one, because those images already start past it, and would
+never bind at all for the learnable visa condition, which never crosses. The
+learnable margins are also about ten times the frozen ones, so no single
+absolute number serves both prompt families. Anchoring the floor to each
+image's own clean margin removes all three problems: `D` means the same thing
+in every condition.
+
+**Scope.** The hinge applies to `margin_topk` only. The `ce_focal_dice` terms
+are already bounded, so its setups never carry the tag. It is used by the
+`per_dataset`, `cross_dataset` and `per_category` scopes, where one delta is
+shared across images. `per_image` does not use it: a delta fitted to the single
+image it attacks has no sharing to balance, so hinging would only stop it
+early. That is also why per-image attack literature such as AutoAttack
+([arXiv:2003.01690](https://arxiv.org/abs/2003.01690)) does not do this.
+
+**Choosing a value.** `D` is in margin units, so read it off a completed run of
+the same setup rather than guessing. `MARGIN_HINGE_DISPLACEMENT=0` reproduces
+CD-UAP's hinge relative to the clean margin, stopping each image the moment it
+improves at all. Larger values push further before saturating.
+
+Every value names its own output (`0.25` gives `..._hinge0p25`), so an A/B
+cannot overwrite itself:
+
+```bash
+RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
+MARGIN_HINGE_DISPLACEMENT=0.25 RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
+```
+
+**Watch the saturated fraction.** Every optimization-diagnostics row carries
+`global_margin_saturated_fraction` and `local_margin_saturated_fraction`. If
+either reaches 1.0 the gradient is exactly zero, and because the update is
+`sign(gradient)` the perturbation then stops moving for the rest of the run.
+Checkpoint selection keeps the best delta, so nothing is corrupted, but the
+remaining steps are wasted and `D` is too small for that condition.
+
 ## Split protocol: balanced or full
 
 `SPLIT_PROTOCOL` selects how the test images are divided. Both split each
@@ -399,8 +492,8 @@ A setup ID is a pure function of the settings that change the work, so a run
 can never be filed under a name describing different parameters:
 
 ```
-epochs + epsilon + [ce_focal_dice] + [step_schedule] + [protocol] + cross_mode
-       + [trainNN] + [learnable_prompt]
+epochs + epsilon + [ce_focal_dice | hinge] + [step_schedule] + [protocol]
+       + cross_mode + [trainNN] + [learnable_prompt]
 ```
 
 Overriding the epoch budget renames the output on its own. `SMOKE_EPOCHS=50`

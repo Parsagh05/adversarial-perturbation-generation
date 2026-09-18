@@ -498,3 +498,149 @@ class ImageMeanReductionTests(unittest.TestCase):
                     for index in range(3)
                 ]
                 self.assertAlmostEqual(actual, sum(singles) / 3, places=5)
+
+
+class _Sample:
+    def __init__(self, category: str, value: float) -> None:
+        self.category = category
+        self.value = value
+
+
+class MarginHingeTests(unittest.TestCase):
+    """An image stops contributing once it has moved far enough toward target.
+
+    The floor is each image's own clean margin minus the displacement, so the
+    hinge means "moved this far from where it started" rather than "past an
+    absolute value". That is what lets one setting work across conditions
+    whose margins differ by an order of magnitude.
+    """
+
+    def _attacker(self, displacement=None) -> TargetedPGD:
+        return TargetedPGD(
+            _MultiCategorySurrogate(),
+            AttackConfig(
+                temperature=1.0,
+                loss_formulation="margin_topk",
+                margin_hinge_displacement=displacement,
+                universal_batch_size=4,
+            ),
+        )
+
+    def _images(self, values) -> torch.Tensor:
+        return torch.stack([torch.full((3, 2, 2), float(v)) for v in values])
+
+    def _floors(self, attacker, samples, target_label, mode="global"):
+        return attacker.hinge_floors(
+            samples,
+            lambda s: torch.full((3, 2, 2), float(s.value)),
+            target_label,
+            mode,
+        )
+
+    def test_disabled_by_default_and_costs_nothing(self) -> None:
+        attacker = self._attacker()
+        samples = [_Sample("bottle", 0.3), _Sample("cable", 0.3)]
+        self.assertIsNone(self._floors(attacker, samples, 1))
+
+    def test_a_saturated_image_stops_changing_the_loss(self) -> None:
+        attacker = self._attacker(displacement=0.0)
+        samples = [_Sample("bottle", 0.3), _Sample("bottle", 0.3)]
+        floors = self._floors(attacker, samples, target_label=1)
+        categories = ["bottle", "bottle"]
+        # Both images have moved toward abnormal, so both are saturated and
+        # moving them further must not change the objective.
+        moved = float(
+            attacker.objective_components(
+                self._images([0.6, 0.6]), categories, 1, "global",
+                hinge_floors=floors,
+            )["global"]
+        )
+        further = float(
+            attacker.objective_components(
+                self._images([0.9, 0.9]), categories, 1, "global",
+                hinge_floors=floors,
+            )["global"]
+        )
+        self.assertAlmostEqual(moved, further, places=6)
+
+    def test_an_unmoved_image_still_contributes(self) -> None:
+        attacker = self._attacker(displacement=0.5)
+        samples = [_Sample("bottle", 0.3), _Sample("bottle", 0.3)]
+        floors = self._floors(attacker, samples, target_label=1)
+        categories = ["bottle", "bottle"]
+        clean = float(
+            attacker.objective_components(
+                self._images([0.3, 0.3]), categories, 1, "global",
+                hinge_floors=floors,
+            )["global"]
+        )
+        nudged = float(
+            attacker.objective_components(
+                self._images([0.35, 0.35]), categories, 1, "global",
+                hinge_floors=floors,
+            )["global"]
+        )
+        self.assertLess(nudged, clean)
+
+    def test_a_large_displacement_reproduces_the_unhinged_loss(self) -> None:
+        attacker = self._attacker(displacement=1000.0)
+        samples = [_Sample("bottle", 0.3), _Sample("cable", 0.7)]
+        floors = self._floors(attacker, samples, target_label=1)
+        categories = ["bottle", "cable"]
+        images = self._images([0.6, 0.2])
+        hinged = float(
+            attacker.objective_components(
+                images, categories, 1, "global", hinge_floors=floors
+            )["global"]
+        )
+        plain = float(
+            attacker.objective_components(images, categories, 1, "global")["global"]
+        )
+        self.assertAlmostEqual(hinged, plain, places=6)
+
+    def test_the_floor_follows_each_image_not_an_absolute_margin(self) -> None:
+        # Two categories whose clean margins differ; the same displacement must
+        # saturate both, which an absolute floor would not do.
+        attacker = self._attacker(displacement=0.0)
+        samples = [_Sample("bottle", 0.3), _Sample("cable", 0.3)]
+        floors = self._floors(attacker, samples, target_label=1)
+        clean = attacker.objective_components(
+            self._images([0.3, 0.3]), ["bottle", "cable"], 1, "global",
+            hinge_floors=floors,
+        )
+        moved = attacker.objective_components(
+            self._images([0.8, 0.8]), ["bottle", "cable"], 1, "global",
+            hinge_floors=floors,
+        )
+        self.assertAlmostEqual(
+            float(clean["global_saturated_fraction"]), 0.0, places=6
+        )
+        self.assertAlmostEqual(
+            float(moved["global_saturated_fraction"]), 1.0, places=6
+        )
+
+    def test_full_saturation_zeroes_the_gradient(self) -> None:
+        # sign(0) = 0 freezes delta, which is why the fraction is recorded.
+        attacker = self._attacker(displacement=0.0)
+        samples = [_Sample("bottle", 0.3), _Sample("bottle", 0.3)]
+        floors = self._floors(attacker, samples, target_label=1)
+        images = self._images([0.8, 0.8]).requires_grad_(True)
+        loss = attacker.objective_components(
+            images, ["bottle", "bottle"], 1, "global", hinge_floors=floors
+        )["global"]
+        gradient = torch.autograd.grad(loss, images, allow_unused=True)[0]
+        self.assertTrue(gradient is None or float(gradient.abs().max()) == 0.0)
+
+    def test_the_hinge_is_ignored_for_the_bounded_loss(self) -> None:
+        # focal and Dice are already bounded, so ce_focal_dice needs no hinge.
+        attacker = TargetedPGD(
+            _MultiCategorySurrogate(),
+            AttackConfig(
+                temperature=1.0,
+                loss_formulation="ce_focal_dice",
+                margin_hinge_displacement=0.0,
+            ),
+        )
+        self.assertIsNone(
+            self._floors(attacker, [_Sample("bottle", 0.3)], target_label=1)
+        )
