@@ -374,6 +374,30 @@ class TargetedPGD:
             "local": direction_sign * torch.cat(clean_local) - displacement,
         }
 
+    def update_direction(
+        self, gradient: torch.Tensor, momentum: torch.Tensor
+    ) -> Tuple[torch.Tensor, float]:
+        """Accumulate the gradient and report how far momentum turned it.
+
+        ``m = decay * m + g``; the step then follows ``sign(m)``, so the
+        epsilon projection and the budget are untouched. A decay of 0 returns
+        the gradient unchanged and is exactly plain sign-PGD.
+
+        The cosine between the accumulated direction and the current gradient
+        is what says whether momentum is doing anything; it is 1.0 when off.
+        """
+
+        if self.config.momentum_decay <= 0.0:
+            return gradient, float("nan")
+        accumulated = self.config.momentum_decay * momentum + gradient
+        scale = accumulated.norm() * gradient.norm()
+        cosine = (
+            float((accumulated * gradient).sum() / scale)
+            if float(scale) > 0.0
+            else float("nan")
+        )
+        return accumulated, cosine
+
     def objective_components(
         self,
         images_01: torch.Tensor,
@@ -576,6 +600,9 @@ class TargetedPGD:
         size = self.config.image_size
         reference = image_loader(samples[0]).unsqueeze(0).to(self.device)
         delta = self._initial_delta((1, 3, size, size), reference)
+        # Starts at zero and evolves deterministically from the step index, so
+        # the first N steps of a long run stay identical to an N-step run.
+        momentum = torch.zeros_like(delta)
         # One pass at delta = 0; None when the hinge is off, so it costs nothing.
         hinge_floors = self.hinge_floors(
             samples, image_loader, target_label, mode, mask_loader=mask_loader
@@ -681,7 +708,9 @@ class TargetedPGD:
                     local_gradient_norm = float(gradient.norm().detach())
             pre_update_loss = float(components["total"].detach())
             step_size = self.step_size_at(step, self.config.universal_steps)
-            delta = delta.detach() - step_size * gradient.sign()
+            direction, momentum_cosine = self.update_direction(gradient, momentum)
+            momentum = direction if self.config.momentum_decay > 0.0 else momentum
+            delta = delta.detach() - step_size * direction.sign()
             delta = delta.clamp(-self.config.epsilon, self.config.epsilon)
             delta = delta.detach()
             with torch.no_grad():
@@ -730,6 +759,7 @@ class TargetedPGD:
                     "combined_gradient_l2": float(gradient.norm().detach()),
                     "combined_gradient_linf": float(gradient.abs().max().detach()),
                     "step_size": step_size,
+                    "momentum_gradient_cosine": momentum_cosine,
                     "global_margin_saturated_fraction": float(
                         updated_components.get(
                             "global_saturated_fraction", torch.tensor(float("nan"))

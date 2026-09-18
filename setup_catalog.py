@@ -151,6 +151,29 @@ def margin_hinge_setting() -> float | None:
     return value
 
 
+def _momentum_tag(momentum_decay: float) -> str:
+    """``0.9`` -> ``"mom0p9"``; plain sign-PGD adds nothing."""
+
+    value = float(momentum_decay)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError("momentum_decay must be in [0, 1]")
+    if value == 0.0:
+        return ""
+    return "mom" + f"{value:g}".replace(".", "p")
+
+
+def momentum_decay_setting() -> float:
+    """Gradient accumulation on the shared update; 0 is plain sign-PGD."""
+
+    raw = os.environ.get("MOMENTUM_DECAY", "").strip()
+    if not raw or raw.lower() in {"none", "off", "false"}:
+        return 0.0
+    value = float(raw)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"MOMENTUM_DECAY must be in [0, 1], got {raw!r}")
+    return value
+
+
 def _epoch_number(value: float) -> str:
     """``7.14`` -> ``7p14``; keeps fractional budgets filesystem-safe."""
 
@@ -181,6 +204,7 @@ def compose_setup_id(
     full_data_cross: bool | None = None,
     step_size_schedule: str = "constant",
     margin_hinge_displacement: float | None = None,
+    momentum_decay: float = 0.0,
 ) -> str:
     """Build the canonical ID for one effective configuration.
 
@@ -203,6 +227,9 @@ def compose_setup_id(
         hinge = _hinge_tag(margin_hinge_displacement)
         if hinge:
             parts.append(hinge)
+    momentum = _momentum_tag(momentum_decay)
+    if momentum:
+        parts.append(momentum)
     schedule = _schedule_tag(step_size_schedule)
     if schedule:
         parts.append(schedule)
@@ -227,6 +254,7 @@ def effective_setup_id(
     full_data_cross: bool | None = None,
     step_size_schedule: str = "constant",
     margin_hinge_displacement: float | None = None,
+    momentum_decay: float = 0.0,
 ) -> str:
     """Canonical ID for a catalog entry after any epoch/fraction override.
 
@@ -245,6 +273,7 @@ def effective_setup_id(
         full_data_cross,
         step_size_schedule,
         margin_hinge_displacement,
+        momentum_decay,
     )
 
 

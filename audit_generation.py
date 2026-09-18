@@ -21,6 +21,7 @@ from setup_catalog import (
     effective_setup_id,
     full_data_cross_setting,
     margin_hinge_setting,
+    momentum_decay_setting,
     split_protocol_setting,
     step_size_schedule_setting,
 )
@@ -46,6 +47,7 @@ SPLIT_PROTOCOL = split_protocol_setting()
 FULL_DATA_CROSS = full_data_cross_setting()
 STEP_SIZE_SCHEDULE = step_size_schedule_setting()
 MARGIN_HINGE = margin_hinge_setting()
+MOMENTUM_DECAY = momentum_decay_setting()
 CROSS_DATASET_FULL_SOURCE = FULL_DATA_CROSS
 # Read the same way the runners read it, so auditing a run that generated one
 # direction checks for that direction instead of reporting the other missing.
@@ -448,6 +450,7 @@ def main() -> None:
         effective_id = effective_setup_id(
             setup, SMOKE_EPOCHS if SMOKE else None, ATTACK_TRAIN_FRACTION,
             SPLIT_PROTOCOL, FULL_DATA_CROSS, STEP_SIZE_SCHEDULE, MARGIN_HINGE,
+            MOMENTUM_DECAY,
         )
         expected_cross_tag = "_fullcross" if FULL_DATA_CROSS else "_halfcross"
         other_cross_tag = "_halfcross" if FULL_DATA_CROSS else "_fullcross"

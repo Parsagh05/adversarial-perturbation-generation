@@ -64,6 +64,11 @@ class AttackConfig:
     # None disables the hinge and keeps the unbounded margin. Only the
     # margin_topk terms need it; focal and Dice are already bounded.
     margin_hinge_displacement: Optional[float] = None
+    # Exponentially weighted accumulation of past gradients on the shared
+    # update: m = decay * m + g, stepping along sign(m). 0.0 is plain
+    # sign-PGD, since m then equals g. 1.0 never forgets, which is MI-FGSM's
+    # convention and cancels margin_hinge_displacement.
+    momentum_decay: float = 0.0
     step_size_schedule: str = "constant"
     step_size_min_ratio: float = 0.1
     diagnostic_interval: int = 10
@@ -138,6 +143,9 @@ class AttackConfig:
             )
         if not 0.0 < self.margin_topk_fraction <= 1.0:
             raise ValueError("margin_topk_fraction must be in (0, 1]")
+        self.momentum_decay = float(self.momentum_decay)
+        if not 0.0 <= self.momentum_decay <= 1.0:
+            raise ValueError("momentum_decay must be in [0, 1]")
         if self.margin_hinge_displacement is not None:
             self.margin_hinge_displacement = float(self.margin_hinge_displacement)
             if self.margin_hinge_displacement < 0.0:

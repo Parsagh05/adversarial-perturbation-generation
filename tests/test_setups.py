@@ -491,3 +491,48 @@ class MarginHingeIdTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MARGIN_HINGE_DISPLACEMENT": "-1"}):
             with self.assertRaises(ValueError):
                 margin_hinge_setting()
+
+
+class MomentumIdTests(unittest.TestCase):
+    """Momentum changes the perturbation, so it names the output."""
+
+    def _setup(self):
+        return SETUPS[f"{BASE}_eps4"]
+
+    def test_plain_sign_pgd_adds_nothing(self) -> None:
+        self.assertEqual(effective_setup_id(self._setup()), f"{BASE}_eps4")
+        self.assertEqual(
+            effective_setup_id(
+                self._setup(), None, 1.0, "balanced", None, "constant", None, 0.0
+            ),
+            f"{BASE}_eps4",
+        )
+
+    def test_each_decay_gets_its_own_name(self) -> None:
+        names = {
+            effective_setup_id(
+                self._setup(), None, 1.0, "balanced", None, "constant", None, value
+            )
+            for value in (0.0, 0.9, 1.0)
+        }
+        self.assertEqual(len(names), 3)
+        self.assertIn(f"{BASE}_eps4_mom0p9", names)
+
+    def test_the_hinge_and_momentum_compose(self) -> None:
+        derived = effective_setup_id(
+            self._setup(), None, 1.0, "balanced", None, "constant", 0.25, 0.9
+        )
+        self.assertEqual(derived, f"{BASE}_eps4_hinge0p25_mom0p9")
+
+    def test_the_environment_setting_is_off_unless_asked(self) -> None:
+        from setup_catalog import momentum_decay_setting
+
+        for value in ("", "none", "off", "0"):
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {"MOMENTUM_DECAY": value}):
+                    self.assertEqual(momentum_decay_setting(), 0.0)
+        with mock.patch.dict(os.environ, {"MOMENTUM_DECAY": "0.9"}):
+            self.assertEqual(momentum_decay_setting(), 0.9)
+        with mock.patch.dict(os.environ, {"MOMENTUM_DECAY": "1.5"}):
+            with self.assertRaises(ValueError):
+                momentum_decay_setting()

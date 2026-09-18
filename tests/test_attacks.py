@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 import unittest
 
@@ -644,3 +645,68 @@ class MarginHingeTests(unittest.TestCase):
         self.assertIsNone(
             self._floors(attacker, [_Sample("bottle", 0.3)], target_label=1)
         )
+
+
+class MomentumTests(unittest.TestCase):
+    """m = decay * m + g, stepping along sign(m). Decay 0 is plain sign-PGD."""
+
+    def _attacker(self, decay: float) -> TargetedPGD:
+        return TargetedPGD(
+            _FakeSurrogate(), AttackConfig(temperature=1.0, momentum_decay=decay)
+        )
+
+    def test_zero_decay_returns_the_gradient_untouched(self) -> None:
+        attacker = self._attacker(0.0)
+        gradient = torch.tensor([1.0, -2.0, 3.0])
+        stale = torch.tensor([9.0, 9.0, 9.0])
+        direction, cosine = attacker.update_direction(gradient, stale)
+        self.assertTrue(torch.equal(direction, gradient))
+        self.assertTrue(math.isnan(cosine))
+
+    def test_the_accumulator_carries_the_previous_gradient(self) -> None:
+        attacker = self._attacker(0.9)
+        first = torch.tensor([1.0, 0.0])
+        second = torch.tensor([0.0, 1.0])
+        momentum = torch.zeros(2)
+        momentum, _ = attacker.update_direction(first, momentum)
+        self.assertTrue(torch.allclose(momentum, first))
+        momentum, _ = attacker.update_direction(second, momentum)
+        self.assertTrue(torch.allclose(momentum, torch.tensor([0.9, 1.0])))
+
+    def test_momentum_can_flip_the_step_the_gradient_alone_would_take(self) -> None:
+        # What the sign actually follows is the accumulation, not the gradient.
+        attacker = self._attacker(0.9)
+        momentum = torch.zeros(2)
+        for _ in range(3):
+            momentum, _ = attacker.update_direction(torch.tensor([1.0, 0.0]), momentum)
+        reversal = torch.tensor([-1.2, 0.0])
+        direction, _ = attacker.update_direction(reversal, momentum)
+        self.assertEqual(float(reversal.sign()[0]), -1.0)
+        self.assertEqual(float(direction.sign()[0]), 1.0)
+
+    def test_the_cosine_reports_whether_momentum_turned_the_direction(self) -> None:
+        attacker = self._attacker(0.9)
+        gradient = torch.tensor([1.0, 0.0])
+        aligned, cosine_aligned = attacker.update_direction(gradient, torch.zeros(2))
+        self.assertAlmostEqual(cosine_aligned, 1.0, places=6)
+        _, cosine_turned = attacker.update_direction(
+            torch.tensor([0.0, 1.0]), aligned
+        )
+        self.assertLess(cosine_turned, 1.0)
+
+    def test_memory_length_follows_the_decay(self) -> None:
+        # Why 1.0 cancels the hinge: the first gradient never fades.
+        first = torch.tensor([1.0])
+        for decay, expected in ((0.9, 0.9 ** 20), (1.0, 1.0)):
+            with self.subTest(decay=decay):
+                attacker = self._attacker(decay)
+                momentum, _ = attacker.update_direction(first, torch.zeros(1))
+                for _ in range(20):
+                    momentum, _ = attacker.update_direction(torch.zeros(1), momentum)
+                self.assertAlmostEqual(float(momentum), expected, places=6)
+
+    def test_the_decay_is_validated(self) -> None:
+        for bad in (-0.1, 1.5):
+            with self.subTest(decay=bad):
+                with self.assertRaisesRegex(ValueError, "momentum_decay"):
+                    AttackConfig(momentum_decay=bad)

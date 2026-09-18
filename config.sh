@@ -123,6 +123,13 @@ NORMAL_TARGET_CENTER_Y="${NORMAL_TARGET_CENTER_Y:-0.5}"
 # and names the setup (0.25 -> _hinge0p25), so an A/B cannot collide. Pick a
 # value from the per-image margins of a completed run; see the README.
 MARGIN_HINGE_DISPLACEMENT="${MARGIN_HINGE_DISPLACEMENT:-}"
+
+# Gradient accumulation on the shared update: m = decay * m + g, stepping
+# along sign(m). Empty or 0 is plain sign-PGD. 0.9 is the recommended value
+# when enabling it; 1.0 never forgets, which is MI-FGSM's convention and
+# cancels MARGIN_HINGE_DISPLACEMENT. Applies to the scopes that share one
+# delta, not to per-image, and names the setup (0.9 -> _mom0p9).
+MOMENTUM_DECAY="${MOMENTUM_DECAY:-}"
 MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL="${MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL:-0.20}"
 MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL="${MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL:-0.40}"
 

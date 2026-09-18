@@ -492,8 +492,8 @@ A setup ID is a pure function of the settings that change the work, so a run
 can never be filed under a name describing different parameters:
 
 ```
-epochs + epsilon + [ce_focal_dice | hinge] + [step_schedule] + [protocol]
-       + cross_mode + [trainNN] + [learnable_prompt]
+epochs + epsilon + [ce_focal_dice | hinge] + [momentum] + [step_schedule]
+       + [protocol] + cross_mode + [trainNN] + [learnable_prompt]
 ```
 
 Overriding the epoch budget renames the output on its own. `SMOKE_EPOCHS=50`
@@ -526,6 +526,92 @@ boundaries, which are not implemented yet.
 uses epsilon/8, so `0.5/255` is the literature-matching alternative. The step
 size is recorded in every manifest but is not part of the setup ID, so sweeping
 it needs a separate output tree.
+
+### Momentum on the shared update
+
+`MOMENTUM_DECAY` accumulates past gradients instead of stepping along the
+current one alone. It is empty by default, which is plain sign-PGD.
+
+**What it does.** With `g` the batch gradient and `m` starting at zero,
+
+```
+m <- MOMENTUM_DECAY * m + g
+delta <- clip( delta - step_size * sign(m) )
+```
+
+The sign and the epsilon projection are unchanged, so the budget is untouched.
+A decay of `0` makes `m` equal `g` and is exactly the behaviour without it.
+`0.9` is the recommended value when enabling it. This is the gradient-momentum
+form used by MI-FGSM (Dong et al., *Boosting Adversarial Attacks with
+Momentum*, CVPR 2018) and by UAT's MSGD variant, not the iterate momentum of
+APGD.
+
+`m` starts at zero and evolves only from the step index, so momentum does not
+break the prefix-consistency the flat step size buys.
+
+**Scope.** The scopes that share one delta: `per_dataset`, `cross_dataset` and
+`per_category`. `per_image` does not use it, matching how the hinge is scoped.
+
+**Why not APGD's momentum.** APGD
+([arXiv:2003.01690](https://arxiv.org/abs/2003.01690)) equation 2 puts momentum
+on the iterate rather than the gradient, and says why: "Since in the early
+iterations of APGD the step size is particularly large, we want to keep a bias
+from the previous steps." APGD starts at twice epsilon. This pipeline runs a
+flat epsilon/16 at epsilon 4/255, so APGD's initial step is 32 times larger
+than ours and the problem its momentum solves does not arise here. APGD is also
+a per-image attack whose momentum is entangled with its adaptive step halving
+and its restart-from-best; taking one clause out of that loop is a different
+algorithm, not APGD.
+
+**What the evidence does and does not say.** UAT
+([arXiv:1811.11304](https://arxiv.org/abs/1811.11304)) compares optimizers for
+a universal perturbation on CIFAR-10, reporting accuracy after the attack where
+lower is stronger: SGD 42.56, MSGD 13.08, ADAM 13.30, PGD 13.79. Read carefully
+before relying on the 0.71 point gap. Their MSGD is momentum on the **raw**
+gradient with no sign; their PGD is the sign with **no** momentum. The
+combination implemented here, the sign of an accumulated gradient, is in
+neither column. UAT also states that unless otherwise specified they use
+sign-of-gradient PGD for generating universal perturbations, so their headline
+results do not use momentum at all.
+
+The better reason to try it is that momentum in the MI-FGSM sense exists to
+improve **transferability**, and these perturbations are fitted on a frozen
+CLIP surrogate and delivered to other detectors. Treat it as an ablation
+switch, not as a setting with a guaranteed payoff.
+
+**Interaction with the margin hinge.** They compose, but the decay decides
+whether the hinge still does anything. A saturated image contributes no fresh
+gradient, yet its earlier pull survives in `m` for about `1 / (1 - decay)`
+steps:
+
+| decay | memory | old pull down to 5% after |
+|---:|---:|---:|
+| 0.9 | 10 steps | 28 steps |
+| 0.99 | 100 steps | 298 steps |
+| 1.0 | never forgets | never |
+
+Against an 800-step per-dataset budget, `0.9` clears a saturated image within
+about 30 steps and the two settings coexist. `1.0`, which is MI-FGSM's
+published convention, keeps that pull at full strength to the last step and
+cancels the hinge outright. Do not copy the paper constant if the hinge is on.
+
+One side effect is useful: with momentum, full saturation no longer freezes the
+run, because `m` stays non-zero when `g` reaches zero and `sign(0) = 0` no
+longer applies.
+
+**Measuring whether it did anything.** Every optimization-diagnostics row
+carries `momentum_gradient_cosine`, the cosine between the accumulated
+direction and the current gradient. Near 1.0 means momentum is not changing the
+step. It is `NaN` when momentum is off.
+
+**Running the ablation.** Each decay names its own output (`0.9` gives
+`..._mom0p9`), so nothing collides. Change one thing at a time, with the hinge
+off, so the comparison measures momentum alone:
+
+```bash
+RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
+MOMENTUM_DECAY=0.9 RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
+```
 
 `ATTACK_TRAIN_FRACTION` is folded in the same way: any value below 1.00 adds a
 `_trainNN` component, so a 20% run lands in `..._train20` and cannot overwrite

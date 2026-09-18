@@ -46,7 +46,11 @@ SETUP_ID = os.environ["SETUP_ID"]
 if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
-from setup_catalog import derive_steps, margin_hinge_setting
+from setup_catalog import (
+    derive_steps,
+    margin_hinge_setting,
+    momentum_decay_setting,
+)
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import MVTecSample, discover_anomaly_datasets, load_image_tensor, load_mask
@@ -139,6 +143,7 @@ NORMAL_TARGET_CENTER_X = float(os.environ.get("NORMAL_TARGET_CENTER_X", "0.5"))
 NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
 STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "constant")
 MARGIN_HINGE_DISPLACEMENT = margin_hinge_setting()
+MOMENTUM_DECAY = momentum_decay_setting()
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "8"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
@@ -290,6 +295,9 @@ def optimize_accumulated(
     sample_position = {
         sample.protocol_id: index for index, sample in enumerate(source_samples)
     }
+    # A category delta is shared too, so it accumulates the same way
+    # optimize_universal does. Zero decay leaves this as plain sign-PGD.
+    momentum = torch.zeros_like(delta)
 
     order = np.arange(len(source_samples))
     cursor = len(order)
@@ -373,7 +381,12 @@ def optimize_accumulated(
                     if loss_mode == "combined" else accumulated_total
                 )
                 step_size = attacker.step_size_at(step, total_steps)
-                delta = (delta.detach() - step_size * gradient.sign()).clamp(
+                direction, momentum_cosine = attacker.update_direction(
+                    gradient, momentum
+                )
+                if attacker.config.momentum_decay > 0.0:
+                    momentum = direction
+                delta = (delta.detach() - step_size * direction.sign()).clamp(
                     -EPSILON, EPSILON
                 ).detach()
                 fixed_losses = {}
@@ -409,6 +422,7 @@ def optimize_accumulated(
                     "gradient_l2": float(gradient.norm().detach()),
                     "gradient_linf": float(gradient.abs().max().detach()),
                     "step_size": step_size,
+                    "momentum_gradient_cosine": momentum_cosine,
                     "delta_saturation_fraction": float(
                         (delta.abs() >= EPSILON - 1e-7).float().mean().detach()
                     ),
@@ -482,6 +496,7 @@ attack_config = AttackConfig(
     margin_topk_fraction=MARGIN_TOPK_FRACTIONS["normal_to_abnormal"],
     step_size_schedule=STEP_SIZE_SCHEDULE,
     margin_hinge_displacement=MARGIN_HINGE_DISPLACEMENT,
+    momentum_decay=MOMENTUM_DECAY,
     step_size_min_ratio=STEP_SIZE_MIN_RATIO,
     diagnostic_interval=DIAGNOSTIC_INTERVAL,
     feature_layers=(6, 12, 18, 24),
@@ -610,6 +625,7 @@ for dataset_name in DATASETS:
                             "normal_target_center_x": NORMAL_TARGET_CENTER_X,
                             "normal_target_center_y": NORMAL_TARGET_CENTER_Y,
                             "step_size_schedule": STEP_SIZE_SCHEDULE,
+                        "momentum_decay": MOMENTUM_DECAY,
                         "margin_hinge_displacement": (
                             MARGIN_HINGE_DISPLACEMENT
                             if MARGIN_HINGE_DISPLACEMENT is not None
