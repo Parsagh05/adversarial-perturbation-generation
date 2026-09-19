@@ -48,6 +48,7 @@ from setup_catalog import (
     margin_hinge_setting,
     momentum_decay_setting,
     checkpoint_selection_setting,
+    scope_output_path,
     snapshot_targets,
 )
 from adversarial_harness.attacks import TargetedPGD, direction_labels
@@ -135,9 +136,16 @@ PER_CROSS_EPOCHS = float(
 )
 
 
+SETTINGS_TAG = os.environ["SETTINGS_TAG"]
 SNAPSHOT_TARGETS = [
-    (budget, Path(root).expanduser().resolve())
-    for budget, root in snapshot_targets()
+    (
+        budget,
+        Path(setups).expanduser().resolve()
+        # The delta store is the per-dataset bundle; the snapshot's own row
+        # builds its cross bundle by copying from there, as the main row does.
+        / scope_output_path("per_dataset", budget, PROMPT_MODE, SETTINGS_TAG),
+    )
+    for budget, setups in snapshot_targets()
 ]
 UNIVERSAL_BATCH_SIZE = int(os.environ.get("PER_DATASET_BATCH_SIZE", "1"))
 LOCAL_FOCAL_WEIGHT = float(os.environ.get("LOCAL_FOCAL_WEIGHT", "0.5"))
@@ -195,11 +203,16 @@ for dataset_name, dataset_root in (("mvtec", MVTEC_ROOT), ("visa", VISA_ROOT)):
 
 # Deltas are optimized once into this store no matter which delivery bundles
 # are requested; the path is unchanged so existing artifacts still reuse.
-OUTPUT_ROOT = OUTPUT_BASE / "canonical_clip_per_dataset"
+# settings / scope / epochs / prompt family. same_dataset and cross_dataset
+# share one optimisation pass but sit at their own budgets, so the deltas are
+# stored under the per-dataset bundle and copied into the cross one.
+OUTPUT_ROOT = Path(os.environ["BUNDLE_PER_DATASET"]).expanduser().resolve()
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 BUNDLE_DIRECTORIES = {
-    "same_dataset": OUTPUT_BASE / "canonical_clip_per_dataset",
-    "cross_dataset": OUTPUT_BASE / "canonical_clip_cross_dataset",
+    "same_dataset": OUTPUT_ROOT,
+    "cross_dataset": Path(
+        os.environ["BUNDLE_CROSS_DATASET"]
+    ).expanduser().resolve(),
 }
 BUNDLE_SCOPES = {"same_dataset": "dataset", "cross_dataset": "cross_dataset"}
 CLIP_CACHE = WORKING / "clip_cache"
@@ -326,7 +339,7 @@ def write_snapshot_artifact(
 
     path = artifact_path(
         source_dataset, fraction, direction, loss_mode, partition_key,
-        root=root / "canonical_clip_per_dataset",
+        root=root,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     final_losses = attacker._diagnostic_losses(
@@ -844,7 +857,6 @@ diagnostics_frame = pd.DataFrame([
     for row in artifact_rows
 ])
 
-source_tag = "-".join(SOURCE_DATASETS)
 for setting in TRANSFER_SETTINGS:
     bundle = BUNDLE_DIRECTORIES[setting]
     rows = delivery_rows[setting]
@@ -890,10 +902,7 @@ for setting in TRANSFER_SETTINGS:
         if sha256_file(recorded_noise) != delivery["artifact_sha256"]:
             raise RuntimeError(f"Manifest checksum mismatch: {recorded_noise}")
 
-    evaluation_tag = "-".join(sorted({str(row["target_dataset"]) for row in rows}))
-    archive_path = OUTPUT_BASE / (
-        f"{bundle.name}_{source_tag}_to_{evaluation_tag}_{SETUP_ID}.zip"
-    )
+    archive_path = bundle / "bundle.zip"
     if archive_path.exists():
         archive_path.unlink()
     with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:

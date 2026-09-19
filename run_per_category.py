@@ -51,6 +51,7 @@ from setup_catalog import (
     margin_hinge_setting,
     momentum_decay_setting,
     checkpoint_selection_setting,
+    scope_output_path,
     snapshot_targets,
 )
 from adversarial_harness.attacks import TargetedPGD, direction_labels
@@ -148,9 +149,14 @@ MARGIN_HINGE_DISPLACEMENT = margin_hinge_setting()
 MOMENTUM_DECAY = momentum_decay_setting()
 # Shorter budgets this run also produces, each into the setup directory the
 # launcher assigned it. A category delta uses the category component.
+SETTINGS_TAG = os.environ["SETTINGS_TAG"]
 SNAPSHOT_TARGETS = [
-    (budget, Path(root).expanduser().resolve())
-    for budget, root in snapshot_targets()
+    (
+        budget,
+        Path(setups).expanduser().resolve()
+        / scope_output_path("per_category", budget, PROMPT_MODE, SETTINGS_TAG),
+    )
+    for budget, setups in snapshot_targets()
 ]
 CHECKPOINT_SELECTION = checkpoint_selection_setting()
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
@@ -204,7 +210,7 @@ def autocast_context():
     )
 
 
-OUTPUT_ROOT = OUTPUT_BASE / "canonical_clip_per_category"
+OUTPUT_ROOT = Path(os.environ["BUNDLE_PER_CATEGORY"]).expanduser().resolve()
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 CLIP_CACHE = WORKING / "clip_cache"
 CLIP_CACHE.mkdir(parents=True, exist_ok=True)
@@ -518,7 +524,7 @@ def write_snapshot_artifact(
 
     path = artifact_path(
         dataset_name, category, fraction, direction, loss_mode,
-        root=root / "canonical_clip_per_category",
+        root=root,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     final_losses = attacker._diagnostic_losses(
@@ -965,10 +971,7 @@ for row in manifest_rows:
     if sha256_file(recorded_noise) != row["artifact_sha256"]:
         raise RuntimeError(f"Manifest checksum mismatch: {recorded_noise}")
 
-dataset_tag = "_".join(DATASETS)
-archive_path = OUTPUT_BASE / (
-    f"canonical_clip_per_category_{dataset_tag}_{SETUP_ID}.zip"
-)
+archive_path = OUTPUT_ROOT / "bundle.zip"
 if archive_path.exists():
     archive_path.unlink()
 with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:

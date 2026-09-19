@@ -99,8 +99,11 @@ from setup_catalog import (
     effective_setup_id,
     full_data_cross_setting,
     checkpoint_selection_setting,
+    SCOPE_DIRECTORIES,
     assert_snapshots_fit,
     compose_setup_id,
+    scope_output_path,
+    settings_tag,
     margin_hinge_setting,
     momentum_decay_setting,
     snapshot_epochs_setting,
@@ -174,11 +177,19 @@ for setup_id, setup in SETUPS.items():
         ":".join(str(value) for value in snapshot) + "=" + snapshot_name
         for snapshot, snapshot_name in rows[1:]
     )
+    settings = settings_tag(
+        setup.epsilon_label, setup.loss_formulation, fraction, protocol,
+        full_data_cross, schedule, hinge, momentum, selection,
+    )
     for index, (row_budget, row_name) in enumerate(rows):
         print("\t".join((
             setup_id, *(str(value) for value in row_budget),
             setup.epsilon_label, setup.loss_formulation, setup.prompt_mode,
-            row_name, spec if index == 0 else "",
+            row_name, spec if index == 0 else "", settings,
+            *(
+                scope_output_path(scope, row_budget, setup.prompt_mode, settings)
+                for scope in SCOPE_DIRECTORIES
+            ),
         )))
 PYEOF
 )"
@@ -227,7 +238,7 @@ selected() {
 }
 
 selected_count=0
-while IFS=$'\t' read -r id _ _ _ _ _ _ prompt_mode _ _; do
+while IFS=$'\t' read -r id _ _ _ _ _ _ prompt_mode _ _ _ _ _ _ _; do
   if selected "$id" "$prompt_mode"; then
     selected_count=$((selected_count + 1))
   fi
@@ -237,30 +248,38 @@ done <<< "$SETUP_TABLE"
   exit 2
 }
 
-while IFS=$'\t' read -r id epochs cross_epochs category_epochs image_epochs epsilon loss_formulation prompt_mode effective_id snapshot_spec; do
+while IFS=$'\t' read -r id epochs cross_epochs category_epochs image_epochs epsilon loss_formulation prompt_mode effective_id snapshot_spec settings_tag bundle_per_dataset bundle_cross_dataset bundle_per_category bundle_per_image; do
   selected "$id" "$prompt_mode" || continue
   if [[ "$prompt_mode" == "frozen_winclip" ]]; then
     prompt_folder="frozen_prompt"
   else
     prompt_folder="learnable_prompt"
   fi
-  # $epochs already carries the smoke override, and $effective_id is derived
-  # from it, so the directory name can never describe different parameters.
-  setup_root="$PIPELINE_OUTPUT/setups/$prompt_folder/$effective_id"
-  # Absolute roots for the shorter budgets this run also produces. Empty for a
-  # snapshot row, which produces none of its own.
+  # The split depends only on the settings, so it is computed once and shared
+  # by every scope, budget and prompt family underneath it. Each bundle keeps
+  # its own copy so it stays independently evaluable.
+  settings_root="$PIPELINE_OUTPUT/setups/$settings_tag"
+  setup_root="$PIPELINE_OUTPUT/setups/$bundle_per_dataset"
+  # Absolute bundle roots for the shorter budgets this run also produces. Empty
+  # for a snapshot row, which produces none of its own. Only the scopes that
+  # share one optimisation pass need them, so each entry carries all four.
   snapshot_roots=""
   if [[ -n "$snapshot_spec" ]]; then
     IFS=';' read -r -a snapshot_entries <<< "$snapshot_spec"
     for entry in "${snapshot_entries[@]}"; do
-      snapshot_roots+="${entry%%=*}=$PIPELINE_OUTPUT/setups/$prompt_folder/${entry#*=};"
+      snapshot_roots+="${entry%%=*}=$PIPELINE_OUTPUT/setups;"
     done
   fi
   echo "===== SETUP $effective_id (requested $id): prompt=$prompt_mode loss=$loss_formulation epochs=dataset:$epochs/cross:$cross_epochs/category:$category_epochs/image:$image_epochs epsilon=$epsilon fraction=$ATTACK_TRAIN_FRACTION ====="
   (
-    export OUTPUT_BASE="$setup_root"
+    export OUTPUT_BASE="$settings_root"
     export SETUP_ID="$effective_id"
-    export PROTOCOL_DIR="$setup_root/protocol"
+    export SETTINGS_TAG="$settings_tag"
+    export PROTOCOL_DIR="$settings_root/protocol"
+    export BUNDLE_PER_DATASET="$PIPELINE_OUTPUT/setups/$bundle_per_dataset"
+    export BUNDLE_CROSS_DATASET="$PIPELINE_OUTPUT/setups/$bundle_cross_dataset"
+    export BUNDLE_PER_CATEGORY="$PIPELINE_OUTPUT/setups/$bundle_per_category"
+    export BUNDLE_PER_IMAGE="$PIPELINE_OUTPUT/setups/$bundle_per_image"
     export ATTACK_TRAIN_CSV="$PROTOCOL_DIR/attack_train_indices.csv"
     export EVALUATION_CSV="$PROTOCOL_DIR/evaluation_test_indices.csv"
     export EPSILON="$epsilon"
@@ -280,17 +299,17 @@ while IFS=$'\t' read -r id epochs cross_epochs category_epochs image_epochs epsi
     export PER_IMAGE_STEP_SIZE="$INITIAL_STEP_SIZE"
     export PER_DATASET_ATTACK_TRAIN_FRACTIONS="$ATTACK_TRAIN_FRACTION"
     export PER_CATEGORY_ATTACK_TRAIN_FRACTIONS="$ATTACK_TRAIN_FRACTION"
-    mkdir -p "$PROTOCOL_DIR" "$setup_root/logs"
+    mkdir -p "$PROTOCOL_DIR" "$BUNDLE_PER_DATASET/logs"
 
-    "$PYTHON" "$ROOT/common.py" split | tee "$setup_root/logs/00_split.log"
+    "$PYTHON" "$ROOT/common.py" split | tee "$BUNDLE_PER_DATASET/logs/00_split.log"
 
     if [[ "$prompt_mode" == "learnable_object_agnostic" ]]; then
       # Resolved after the split so the prompts can be fitted on this run's own
       # attack-training cohort. Progress goes to stderr and the log; stdout is
       # the resolved checkpoint paths, which replace whatever config.sh held.
-      prompt_env="$setup_root/logs/01_prompts.env"
+      prompt_env="$BUNDLE_PER_DATASET/logs/01_prompts.env"
       "$PYTHON" "$ROOT/ensure_prompt_checkpoint.py" 2>&1 >"$prompt_env" \
-        | tee "$setup_root/logs/01_prompts.log" >&2
+        | tee "$BUNDLE_PER_DATASET/logs/01_prompts.log" >&2
       source "$prompt_env"
     fi
 
@@ -298,7 +317,7 @@ while IFS=$'\t' read -r id epochs cross_epochs category_epochs image_epochs epsi
       local enabled="$1" name="$2" script="$3"
       if [[ "${enabled,,}" == "true" ]]; then
         echo "===== $id/$name ====="
-        "$PYTHON" "$ROOT/$script" 2>&1 | tee "$setup_root/logs/$name.log"
+        "$PYTHON" "$ROOT/$script" 2>&1 | tee "$BUNDLE_PER_DATASET/logs/$name.log"
       fi
     }
 
@@ -311,7 +330,7 @@ while IFS=$'\t' read -r id epochs cross_epochs category_epochs image_epochs epsi
     if [[ -n "$dataset_settings" ]]; then
       export DATASET_TRANSFER_SETTINGS="$dataset_settings"
       echo "===== $id/dataset_scopes ($dataset_settings) ====="
-      "$PYTHON" "$ROOT/run_per_dataset.py" 2>&1 | tee "$setup_root/logs/per_dataset.log"
+      "$PYTHON" "$ROOT/run_per_dataset.py" 2>&1 | tee "$BUNDLE_PER_DATASET/logs/per_dataset.log"
     fi
 
     run_mode "$RUN_PER_CATEGORY" per_category run_per_category.py

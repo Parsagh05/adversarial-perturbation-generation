@@ -19,6 +19,8 @@ from adversarial_harness.prompts import (
 from setup_catalog import (
     SETUPS,
     effective_setup_id,
+    scope_output_path,
+    settings_tag,
     full_data_cross_setting,
     checkpoint_selection_setting,
     margin_hinge_setting,
@@ -61,23 +63,20 @@ if not EXPECTED_DIRECTIONS or _unknown_directions:
         f"got {EXPECTED_DIRECTIONS}"
     )
 
+# The manifest calls the per-dataset scope "dataset", but the tree names every
+# directory after the runner that fills it, so the two spellings are mapped
+# rather than reconciled.
 SCOPES = {
-    "dataset": (
-        os.environ.get("RUN_PER_DATASET", "true"),
-        "canonical_clip_per_dataset",
-    ),
-    "per_category": (
-        os.environ.get("RUN_PER_CATEGORY", "true"),
-        "canonical_clip_per_category",
-    ),
-    "cross_dataset": (
-        os.environ.get("RUN_CROSS_DATASET", "true"),
-        "canonical_clip_cross_dataset",
-    ),
-    "per_image": (
-        os.environ.get("RUN_PER_IMAGE", "true"),
-        "canonical_clip_per_image",
-    ),
+    "dataset": os.environ.get("RUN_PER_DATASET", "true"),
+    "per_category": os.environ.get("RUN_PER_CATEGORY", "true"),
+    "cross_dataset": os.environ.get("RUN_CROSS_DATASET", "true"),
+    "per_image": os.environ.get("RUN_PER_IMAGE", "true"),
+}
+SCOPE_DIRECTORIES_BY_SCOPE = {
+    "dataset": "per_dataset",
+    "cross_dataset": "cross_dataset",
+    "per_category": "per_category",
+    "per_image": "per_image",
 }
 
 
@@ -117,17 +116,17 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def audit_protocol(setup_root: Path) -> None:
-    protocol = setup_root / "protocol"
+def audit_protocol(settings_root: Path) -> None:
+    protocol = settings_root / "protocol"
     train = pd.read_csv(protocol / "attack_train_indices.csv")
     evaluation = pd.read_csv(protocol / "evaluation_test_indices.csv")
     complete = pd.read_csv(protocol / "complete_retained_indices.csv")
     if set(train.protocol_id) & set(evaluation.protocol_id):
-        raise RuntimeError(f"Train/evaluation leakage in {setup_root.name}")
+        raise RuntimeError(f"Train/evaluation leakage in {settings_root.name}")
     if complete.protocol_id.duplicated().any():
-        raise RuntimeError(f"Duplicate complete-cohort IDs in {setup_root.name}")
+        raise RuntimeError(f"Duplicate complete-cohort IDs in {settings_root.name}")
     if set(complete.partition.astype(str)) != {"attack_train", "evaluation"}:
-        raise RuntimeError(f"Incomplete retained cohort in {setup_root.name}")
+        raise RuntimeError(f"Incomplete retained cohort in {settings_root.name}")
     expected_train = complete[
         complete.dataset.astype(str).isin(set(train.dataset.astype(str)))
         & complete.partition.astype(str).eq("attack_train")
@@ -146,9 +145,9 @@ def audit_protocol(setup_root: Path) -> None:
         ["dataset", "category", "partition", "label"]
     ).size().unstack(fill_value=0)
     if set(counts.columns) != {0, 1} or (counts[[0, 1]] == 0).any().any():
-        raise RuntimeError(f"A protocol stratum is missing a label in {setup_root.name}")
+        raise RuntimeError(f"A protocol stratum is missing a label in {settings_root.name}")
     if SPLIT_PROTOCOL == "balanced" and not counts[0].eq(counts[1]).all():
-        raise RuntimeError(f"Unbalanced protocol in {setup_root.name}")
+        raise RuntimeError(f"Unbalanced protocol in {settings_root.name}")
 
 
 def audit_dataset_cohort_routing(
@@ -257,15 +256,14 @@ def audit_dataset_cohort_routing(
 
 
 def audit_scope(
-    setup_root: Path,
+    settings_root: Path,
     scope: str,
-    bundle_name: str,
+    bundle: Path,
     expected_epochs: dict[str, float],
     expected_epsilon: float,
     expected_loss_formulation: str,
     expected_prompt_mode: str,
 ) -> set[str]:
-    bundle = setup_root / bundle_name
     manifest_path = bundle / "attack_manifest.csv"
     diagnostics_path = bundle / "optimization_diagnostics.csv"
     for required in (
@@ -281,7 +279,7 @@ def audit_scope(
     manifest = pd.read_csv(manifest_path)
     diagnostics = pd.read_csv(diagnostics_path)
     if manifest.empty or diagnostics.empty or set(manifest.scope) != {scope}:
-        raise RuntimeError(f"Invalid {scope} tables in {setup_root.name}")
+        raise RuntimeError(f"Invalid {scope} tables in {settings_root.name}")
     # The step count is derived from the epoch budget and each condition's own
     # training-set size, so one manifest legitimately holds several values; the
     # budget is what must match.
@@ -367,7 +365,7 @@ def audit_scope(
         raise RuntimeError(
             f"Wrong split protocol in {manifest_path}: expected {SPLIT_PROTOCOL}"
         )
-    audit_dataset_cohort_routing(setup_root, scope, manifest, manifest_path)
+    audit_dataset_cohort_routing(settings_root, scope, manifest, manifest_path)
 
     numeric_columns = (
         "initial_total_loss",
@@ -460,20 +458,31 @@ def main() -> None:
             raise RuntimeError(
                 f"Setup ID does not encode cross cohort mode: {effective_id}"
             )
-        prompt_folder = (
-            "frozen_prompt"
-            if setup.prompt_mode == "frozen_winclip"
-            else "learnable_prompt"
+        # settings / scope / epochs / prompt family: the split is shared by
+        # every scope and budget beneath one settings directory.
+        settings = settings_tag(
+            setup.epsilon_label, setup.loss_formulation, ATTACK_TRAIN_FRACTION,
+            SPLIT_PROTOCOL, FULL_DATA_CROSS, STEP_SIZE_SCHEDULE, MARGIN_HINGE,
+            MOMENTUM_DECAY, CHECKPOINT_SELECTION,
         )
-        setup_root = ROOT / "setups" / prompt_folder / effective_id
-        audit_protocol(setup_root)
-        for scope, (flag, bundle_name) in SCOPES.items():
+        budget = (
+            (SMOKE_EPOCHS,) * 4 if SMOKE else
+            (setup.epochs, setup.cross_epochs, setup.category_epochs,
+             setup.image_epochs)
+        )
+        settings_root = ROOT / "setups" / settings
+        audit_protocol(settings_root)
+        for scope, flag in SCOPES.items():
             if enabled(flag):
+                bundle = ROOT / "setups" / scope_output_path(
+                    SCOPE_DIRECTORIES_BY_SCOPE[scope], budget,
+                    setup.prompt_mode, settings,
+                )
                 protocol_hashes.update(
                     audit_scope(
-                        setup_root,
+                        settings_root,
                         scope,
-                        bundle_name,
+                        bundle,
                         expected_epochs,
                         setup.epsilon,
                         setup.loss_formulation,

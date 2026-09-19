@@ -113,21 +113,25 @@ Done. Results are in: <OUTPUT_BASE>/setups
 Combined archive: <OUTPUT_BASE>/full_outputs.zip
 ```
 
-Outputs for each setup are under:
-
-Each setup directory holds one bundle per enabled scope:
-`canonical_clip_per_dataset`, `canonical_clip_cross_dataset`,
-`canonical_clip_per_category`, `canonical_clip_per_image`. The first two share a
-single optimization pass.
+Outputs are grouped by settings, then scope, then that scope's epoch budget,
+then prompt family. `<settings>` is the effective setup ID without the epoch
+component and without the prompt-family suffix, so budgets worth comparing sit
+side by side:
 
 ```text
-<OUTPUT_BASE>/setups/frozen_prompt/<frozen_setup_id>/
-<OUTPUT_BASE>/setups/learnable_prompt/<learnable_setup_id>/
+<OUTPUT_BASE>/setups/<settings>/protocol/
+<OUTPUT_BASE>/setups/<settings>/per_dataset/ep<epochs>/frozen_prompt/
+<OUTPUT_BASE>/setups/<settings>/cross_dataset/ep<cross_epochs>/frozen_prompt/
+<OUTPUT_BASE>/setups/<settings>/per_category/ep<category_epochs>/frozen_prompt/
+<OUTPUT_BASE>/setups/<settings>/per_image/ep<image_epochs>/frozen_prompt/
 <OUTPUT_BASE>/full_outputs.zip
 ```
 
-`full_outputs.zip` contains the complete setup tree but excludes the redundant
-per-scope ZIP files already stored inside individual setup directories.
+`learnable_prompt/` sits beside `frozen_prompt/` wherever that family was run.
+The per-dataset and cross-dataset scopes share a single optimization pass but
+keep their own budgets and their own directories. Each leaf holds its bundle
+plus a `bundle.zip` of itself; `full_outputs.zip` contains the complete tree
+but excludes those redundant per-bundle archives.
 
 The cross mode is explicit in every effective setup ID: `_fullcross` uses both
 retained halves and `_halfcross` uses source `attack_train` plus target

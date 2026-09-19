@@ -828,21 +828,47 @@ Each source/evaluation selection uses a separate output/protocol directory.
 
 ## Outputs
 
-Outputs are first separated by prompt family and then by setup ID:
+Outputs are grouped by everything that shapes the attack except how long it
+ran, then by scope, then by the budget that scope spent, then by prompt family:
 
 ```text
 OUTPUT_BASE/setups/
-├── frozen_prompt/
-│   └── <frozen_setup_id>/
-└── learnable_prompt/
-    └── <learnable_setup_id>/
+└── <settings>/
+    ├── protocol/
+    ├── per_dataset/
+    │   └── ep<epochs>/
+    │       ├── frozen_prompt/
+    │       └── learnable_prompt/
+    ├── cross_dataset/
+    │   └── ep<cross_epochs>/
+    │       ├── frozen_prompt/
+    │       └── learnable_prompt/
+    ├── per_category/
+    │   └── ep<category_epochs>/
+    │       ├── frozen_prompt/
+    │       └── learnable_prompt/
+    └── per_image/
+        └── ep<image_epochs>/
+            ├── frozen_prompt/
+            └── learnable_prompt/
 ```
 
-Each setup directory contains its own protocol CSVs, logs, uncompressed
-bundles, and archives:
+`<settings>` is the effective setup ID with the epoch component and the
+prompt-family suffix removed, so it carries epsilon, loss formulation, hinge,
+momentum, schedule, checkpoint selection, split protocol, cross mode, and
+attack-train fraction. Defaults contribute nothing, so a default run is named
+only by the parameters it actually changed.
+
+Each scope directory holds only the budget that scope spends. Two runs that
+differ solely in epochs land side by side under one `<settings>`, which makes a
+budget sweep a single directory listing, and a snapshot budget is
+indistinguishable from a standalone run at the same budget.
+
+The split depends only on the settings, so the protocol CSVs are written once
+at `<settings>/protocol/`:
 
 ```text
-protocol/
+<settings>/protocol/
 ├── attack_train_indices.csv
 ├── evaluation_test_indices.csv
 └── complete_retained_indices.csv
@@ -851,32 +877,35 @@ protocol/
 The complete file is authoritative for `fullcross`; `halfcross` continues to
 use the two role-specific files.
 
-- `canonical_clip_per_dataset/`
-- `canonical_clip_cross_dataset/`
-- `canonical_clip_per_category/`
-- `canonical_clip_per_image/`
-- `canonical_clip_per_dataset_<datasets>_<setup_id>.zip`
-- `canonical_clip_per_category_<datasets>_<setup_id>.zip`
-- `canonical_clip_per_image_<datasets>_<setup_id>.zip`
+Every bundle leaf also keeps its own copy of those three CSVs plus its
+perturbations, manifest, diagnostics, and a `bundle.zip` of itself, so a single
+leaf can be shipped and evaluated without the rest of the tree:
+
+```text
+<settings>/per_dataset/ep7p14/frozen_prompt/
+├── attack_train_indices.csv
+├── evaluation_test_indices.csv
+├── complete_retained_indices.csv
+├── attack_manifest.csv
+├── optimization_diagnostics.csv
+├── logs/
+├── <perturbation .pt files>
+└── bundle.zip
+```
+
+The shared copy is the source and the leaf copies are written from it, so they
+cannot disagree.
 
 After every selected setup passes the generation audit, the launcher also
 creates `OUTPUT_BASE/full_outputs.zip`. This combined archive contains the
 complete `setups/` directory tree, including perturbations, manifests,
-diagnostics, protocols, and logs. Existing per-scope ZIP files are not nested
-inside it, avoiding duplicate copies of the same perturbations.
+diagnostics, protocols, and logs. The per-bundle `bundle.zip` files are not
+nested inside it, avoiding duplicate copies of the same perturbations.
 
-For example, a balanced/full-cross MVTec dataset-level run is packaged as
-`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_fullcross.zip`.
-Dataset, scope, epochs, epsilon, cross mode, and loss setup remain separate. A
-relaxed-loss run uses a distinct name such as
-`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_ce_focal_dice_fullcross.zip`
-and cannot overwrite the default-loss setup.
-Likewise, a learnable-prompt run has a distinct name such as
-`canonical_clip_per_dataset_mvtec_ep7p14_cat100_img100_eps2_ce_focal_dice_fullcross_learnable_prompt.zip`.
-
-Do not merge these archives with the old `canonical_clip_*` bundles under the
-same dataset version. Publish them as a new Kaggle dataset version and rerun the
-black-box evaluations before drawing conclusions from local or combined losses.
+Do not merge these outputs with bundles produced by the earlier flat layout
+under the same dataset version. Publish them as a new Kaggle dataset version and
+rerun the black-box evaluations before drawing conclusions from local or
+combined losses.
 
 The ready-to-run Kaggle notebook is
 `kaggle_generate_corrected_perturbations.ipynb` in this directory.

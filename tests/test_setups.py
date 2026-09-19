@@ -17,6 +17,9 @@ from setup_catalog import (
     epoch_grid,
     epsilon_grid,
     full_data_cross_setting,
+    SCOPE_DIRECTORIES,
+    scope_output_path,
+    settings_tag,
     split_protocol_setting,
 )
 
@@ -248,6 +251,23 @@ class ShellLauncherTests(unittest.TestCase):
                 setup.loss_formulation, setup.prompt_mode,
                 effective_setup_id(setup, full_data_cross=True),
                 "",
+                settings_tag(
+                    setup.epsilon_label, setup.loss_formulation, 1.0,
+                    "balanced", True,
+                ),
+                *(
+                    scope_output_path(
+                        scope,
+                        (setup.epochs, setup.cross_epochs,
+                         setup.category_epochs, setup.image_epochs),
+                        setup.prompt_mode,
+                        settings_tag(
+                            setup.epsilon_label, setup.loss_formulation, 1.0,
+                            "balanced", True,
+                        ),
+                    )
+                    for scope in SCOPE_DIRECTORIES
+                ),
             ]
             for setup_id, setup in SETUPS.items()
         ]
@@ -287,12 +307,19 @@ class ShellLauncherTests(unittest.TestCase):
             with self.subTest(effective=row[8]):
                 self.assertIn("_train20", row[8])
 
-    def test_launcher_uses_the_effective_name_for_output_and_label(self) -> None:
+    def test_launcher_builds_the_tree_from_the_emitted_paths(self) -> None:
         launcher = (Path(__file__).resolve().parents[1] / "train.sh").read_text(
             encoding="utf-8"
         )
-        self.assertIn('setups/$prompt_folder/$effective_id', launcher)
+        # The layout lives in scope_output_path, not in shell string building.
+        self.assertIn('settings_root="$PIPELINE_OUTPUT/setups/$settings_tag"', launcher)
+        self.assertIn(
+            'export BUNDLE_PER_DATASET="$PIPELINE_OUTPUT/setups/$bundle_per_dataset"',
+            launcher,
+        )
+        self.assertIn('export PROTOCOL_DIR="$settings_root/protocol"', launcher)
         self.assertIn('export SETUP_ID="$effective_id"', launcher)
+        self.assertNotIn("setups/$prompt_folder/$effective_id", launcher)
 
 
 class SplitProtocolTests(unittest.TestCase):
@@ -988,3 +1015,70 @@ class OutputLayoutTests(unittest.TestCase):
         ]
         parents = {path.rsplit("/", 2)[0] for path in paths}
         self.assertEqual(len(parents), 1)
+
+
+class LauncherAuditAgreementTests(unittest.TestCase):
+    """The launcher writes where the audit looks, for every scope.
+
+    These are two separate derivations of the same tree, so a divergence
+    would surface as a run that completes and then fails its own audit.
+    """
+
+    def _launcher_paths(self, **overrides):
+        rows = _launcher_table(
+            SETUP_EPOCHS="7.14:100:100", SETUP_EPSILONS="4/255",
+            STEP_SIZE_SCHEDULE="constant", SPLIT_PROTOCOL="full",
+            FULL_DATA_CROSS="true", **overrides,
+        )
+        return {row[8]: (row[10], row[11:15]) for row in rows}
+
+    def _audit_paths(self, setup):
+        from setup_catalog import scope_output_path, settings_tag
+
+        settings = settings_tag(
+            setup.epsilon_label, setup.loss_formulation, 1.0, "full", True,
+            "constant", None, 0.0, "final",
+        )
+        budget = (
+            setup.epochs, setup.cross_epochs, setup.category_epochs,
+            setup.image_epochs,
+        )
+        return settings, [
+            scope_output_path(scope, budget, setup.prompt_mode, settings)
+            for scope in SCOPE_DIRECTORIES
+        ]
+
+    def test_every_scope_path_matches(self) -> None:
+        from setup_catalog import build_setups
+
+        emitted = self._launcher_paths()
+        catalog = build_setups(
+            epsilons=("4/255",), split_protocol="full", full_data_cross=True,
+        )
+        self.assertTrue(emitted)
+        for name, setup in catalog.items():
+            with self.subTest(setup=name):
+                self.assertIn(name, emitted)
+                settings, scopes = self._audit_paths(setup)
+                self.assertEqual(emitted[name][0], settings)
+                self.assertEqual(list(emitted[name][1]), scopes)
+
+    def test_the_audit_no_longer_walks_the_old_tree(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1] / "audit_generation.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("canonical_clip_per_dataset", source)
+        self.assertNotIn("prompt_folder", source)
+        self.assertIn("scope_output_path", source)
+
+    def test_the_runners_take_their_bundle_from_the_launcher(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for name, variable in (
+            ("run_per_dataset.py", "BUNDLE_PER_DATASET"),
+            ("run_per_category.py", "BUNDLE_PER_CATEGORY"),
+            ("run_per_image.py", "BUNDLE_PER_IMAGE"),
+        ):
+            with self.subTest(runner=name):
+                source = (root / name).read_text(encoding="utf-8")
+                self.assertIn(f'os.environ["{variable}"]', source)
+                self.assertNotIn('OUTPUT_BASE / "canonical_clip', source)

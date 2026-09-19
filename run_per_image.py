@@ -48,6 +48,7 @@ if not ANOMALYCLIP_ROOT.exists():
 from setup_catalog import (
     checkpoint_selection_setting,
     derive_steps,
+    scope_output_path,
     snapshot_targets,
 )
 from adversarial_harness.attacks import TargetedPGD, direction_labels
@@ -131,9 +132,14 @@ PER_IMAGE_EPOCHS = float(os.environ["PER_IMAGE_EPOCHS"])
 PER_IMAGE_STEPS = derive_steps(PER_IMAGE_EPOCHS, 1, 1)
 # Shorter budgets this run also produces. A per-image delta trains on one
 # image, so an epoch is a step and the image component maps straight across.
+SETTINGS_TAG = os.environ["SETTINGS_TAG"]
 SNAPSHOT_TARGETS = [
-    (budget, Path(root).expanduser().resolve())
-    for budget, root in snapshot_targets()
+    (
+        budget,
+        Path(setups).expanduser().resolve()
+        / scope_output_path("per_image", budget, PROMPT_MODE, SETTINGS_TAG),
+    )
+    for budget, setups in snapshot_targets()
 ]
 SNAPSHOT_IMAGE_STEPS = {
     derive_steps(budget[3], 1, 1): (budget, root)
@@ -202,7 +208,7 @@ def autocast_context():
     )
 
 
-OUTPUT_ROOT = OUTPUT_BASE / "canonical_clip_per_image"
+OUTPUT_ROOT = Path(os.environ["BUNDLE_PER_IMAGE"]).expanduser().resolve()
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 CLIP_CACHE = WORKING / "clip_cache"
 CLIP_CACHE.mkdir(parents=True, exist_ok=True)
@@ -395,7 +401,7 @@ def write_snapshot_artifact(
 
     path = artifact_path(
         dataset_name, category, direction, loss_mode,
-        root=root / "canonical_clip_per_image",
+        root=root,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_metadata = {
@@ -750,10 +756,7 @@ for row in manifest_rows:
     if sha256_file(recorded_noise) != row["artifact_sha256"]:
         raise RuntimeError(f"Manifest checksum mismatch: {recorded_noise}")
 
-dataset_tag = "_".join(DATASETS)
-archive_path = OUTPUT_BASE / (
-    f"canonical_clip_per_image_{dataset_tag}_{SETUP_ID}.zip"
-)
+archive_path = OUTPUT_ROOT / "bundle.zip"
 if archive_path.exists():
     archive_path.unlink()
 with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
