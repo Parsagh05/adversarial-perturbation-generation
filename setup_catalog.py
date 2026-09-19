@@ -331,14 +331,16 @@ def _epochs_tag(
     )
 
 
-def compose_setup_id(
-    epochs: float,
-    cross_epochs: float,
-    category_epochs: float,
-    image_epochs: float,
+SCOPE_DIRECTORIES = ("per_dataset", "cross_dataset", "per_category", "per_image")
+PROMPT_FAMILY_DIRECTORIES = {
+    "frozen_winclip": "frozen_prompt",
+    "learnable_object_agnostic": "learnable_prompt",
+}
+
+
+def settings_tag(
     epsilon_label: str,
     loss_formulation: str,
-    prompt_mode: str,
     attack_train_fraction: float = 1.0,
     split_protocol: str = "balanced",
     full_data_cross: bool | None = None,
@@ -347,19 +349,14 @@ def compose_setup_id(
     momentum_decay: float = 0.0,
     checkpoint_selection: str = "final",
 ) -> str:
-    """Build the canonical ID for one effective configuration.
+    """Everything that shapes the attack except the epoch budgets.
 
-    Every component that changes the produced perturbations appears in the
-    name. ``_learnable_prompt`` stays last so ``${id%_learnable_prompt}`` keeps
-    recovering the frozen base ID in the launcher.
+    This is the directory that groups budgets worth comparing: two runs sharing
+    it differ only in how long they ran, so putting the budget below it makes a
+    budget sweep one directory listing.
     """
 
-    parts = [
-        _epochs_tag(
-            epochs, cross_epochs, category_epochs, image_epochs, full_data_cross
-        ),
-        _epsilon_tag(epsilon_label),
-    ]
+    parts = [_epsilon_tag(epsilon_label)]
     # margin_topk is the default loss and adds nothing; ce_focal_dice names
     # itself, so switching back to it cannot overwrite a default-loss run.
     if loss_formulation == "ce_focal_dice":
@@ -387,6 +384,70 @@ def compose_setup_id(
     fraction = _fraction_tag(attack_train_fraction)
     if fraction:
         parts.append(fraction)
+    return "_".join(parts)
+
+
+def scope_epochs_tag(scope: str, budget) -> str:
+    """The one budget that scope actually spends, as ``ep7p14``.
+
+    Each scope stops at its own boundary, so a scope directory holds only the
+    number that shaped what is inside it rather than the whole quadruple.
+    """
+
+    if scope not in SCOPE_DIRECTORIES:
+        raise ValueError(f"scope must be one of {SCOPE_DIRECTORIES}, got {scope!r}")
+    index = SCOPE_DIRECTORIES.index(scope)
+    return f"ep{_epoch_number(budget[index])}"
+
+
+def scope_output_path(
+    scope: str, budget, prompt_mode: str, settings: str
+) -> str:
+    """``<settings>/<scope>/<epochs>/<prompt family>``, relative to setups/."""
+
+    if prompt_mode not in PROMPT_FAMILY_DIRECTORIES:
+        raise ValueError(f"Unknown prompt mode: {prompt_mode!r}")
+    return "/".join((
+        settings,
+        scope,
+        scope_epochs_tag(scope, budget),
+        PROMPT_FAMILY_DIRECTORIES[prompt_mode],
+    ))
+
+
+def compose_setup_id(
+    epochs: float,
+    cross_epochs: float,
+    category_epochs: float,
+    image_epochs: float,
+    epsilon_label: str,
+    loss_formulation: str,
+    prompt_mode: str,
+    attack_train_fraction: float = 1.0,
+    split_protocol: str = "balanced",
+    full_data_cross: bool | None = None,
+    step_size_schedule: str = "constant",
+    margin_hinge_displacement: float | None = None,
+    momentum_decay: float = 0.0,
+    checkpoint_selection: str = "final",
+) -> str:
+    """Build the canonical ID for one effective configuration.
+
+    Every component that changes the produced perturbations appears in the
+    name. ``_learnable_prompt`` stays last so ``${id%_learnable_prompt}`` keeps
+    recovering the frozen base ID in the launcher.
+    """
+
+    parts = [
+        _epochs_tag(
+            epochs, cross_epochs, category_epochs, image_epochs, full_data_cross
+        ),
+        *settings_tag(
+            epsilon_label, loss_formulation, attack_train_fraction,
+            split_protocol, full_data_cross, step_size_schedule,
+            margin_hinge_displacement, momentum_decay, checkpoint_selection,
+        ).split("_"),
+    ]
     if prompt_mode == "learnable_object_agnostic":
         parts.append("learnable_prompt")
     return "_".join(parts)

@@ -887,3 +887,104 @@ class SnapshotTargetParsingTests(unittest.TestCase):
                 source = (root / name).read_text(encoding="utf-8")
                 self.assertIn("snapshot_targets", source)
                 self.assertIn("write_snapshot_artifact", source)
+
+
+class OutputLayoutTests(unittest.TestCase):
+    """The directory layout and the flat setup ID share one source of truth.
+
+    The tree groups by settings, then scope, then that scope's own budget,
+    then prompt family, so a budget sweep is one directory listing. The flat
+    ID is still what manifests and the reuse guard key on.
+    """
+
+    def _settings(self, **overrides):
+        from setup_catalog import settings_tag
+
+        arguments = {
+            "epsilon_label": "4/255",
+            "loss_formulation": "margin_topk",
+            "attack_train_fraction": 1.0,
+            "split_protocol": "balanced",
+            "full_data_cross": None,
+            "step_size_schedule": "constant",
+            "margin_hinge_displacement": None,
+            "momentum_decay": 0.0,
+            "checkpoint_selection": "final",
+        }
+        arguments.update(overrides)
+        return settings_tag(**arguments)
+
+    def test_the_settings_tag_carries_no_epoch_numbers(self) -> None:
+        tag = self._settings()
+        self.assertEqual(tag, "eps4")
+        self.assertNotIn("ep", tag.replace("eps", ""))
+
+    def test_it_carries_everything_else_that_shapes_the_attack(self) -> None:
+        tag = self._settings(
+            loss_formulation="ce_focal_dice", attack_train_fraction=0.2,
+            split_protocol="full", full_data_cross=True,
+            step_size_schedule="linear", checkpoint_selection="best",
+        )
+        for component in ("eps4", "ce_focal_dice", "linear_step", "best",
+                          "full", "fullcross", "train20"):
+            with self.subTest(component=component):
+                self.assertIn(component, tag)
+
+    def test_the_flat_id_is_the_epochs_tag_plus_the_settings_tag(self) -> None:
+        # One source of truth: the two can never describe different runs.
+        from setup_catalog import compose_setup_id
+
+        derived = compose_setup_id(
+            7.14, 7.14, 100, 100, "4/255", "margin_topk", "frozen_winclip",
+            0.2, "full", True,
+        )
+        self.assertTrue(
+            derived.endswith(
+                self._settings(
+                    attack_train_fraction=0.2, split_protocol="full",
+                    full_data_cross=True,
+                )
+            )
+        )
+
+    def test_each_scope_directory_shows_its_own_budget(self) -> None:
+        from setup_catalog import scope_epochs_tag
+
+        budget = (7.14, 3.0, 100.0, 60.0)
+        self.assertEqual(scope_epochs_tag("per_dataset", budget), "ep7p14")
+        self.assertEqual(scope_epochs_tag("cross_dataset", budget), "ep3")
+        self.assertEqual(scope_epochs_tag("per_category", budget), "ep100")
+        self.assertEqual(scope_epochs_tag("per_image", budget), "ep60")
+
+    def test_an_unknown_scope_is_refused(self) -> None:
+        from setup_catalog import scope_epochs_tag
+
+        with self.assertRaisesRegex(ValueError, "scope must be one of"):
+            scope_epochs_tag("per_pixel", (1, 1, 1, 1))
+
+    def test_the_path_orders_settings_scope_epochs_family(self) -> None:
+        from setup_catalog import scope_output_path
+
+        self.assertEqual(
+            scope_output_path(
+                "per_category", (7.14, 7.14, 100.0, 100.0),
+                "learnable_object_agnostic", "eps4_full_fullcross",
+            ),
+            "eps4_full_fullcross/per_category/ep100/learnable_prompt",
+        )
+
+    def test_an_unknown_prompt_mode_is_refused(self) -> None:
+        from setup_catalog import scope_output_path
+
+        with self.assertRaisesRegex(ValueError, "Unknown prompt mode"):
+            scope_output_path("per_dataset", (1, 1, 1, 1), "invented", "eps4")
+
+    def test_budgets_sharing_settings_land_side_by_side(self) -> None:
+        from setup_catalog import scope_output_path
+
+        paths = [
+            scope_output_path("per_dataset", budget, "frozen_winclip", "eps4")
+            for budget in ((5, 5, 60, 60), (7.14, 7.14, 100, 100))
+        ]
+        parents = {path.rsplit("/", 2)[0] for path in paths}
+        self.assertEqual(len(parents), 1)
