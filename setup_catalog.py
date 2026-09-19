@@ -178,20 +178,24 @@ CHECKPOINT_SELECTIONS = ("best", "final")
 
 
 def _selection_tag(checkpoint_selection: str) -> str:
-    """``""`` for the retained best iterate, ``final`` for the last step."""
+    """``""`` for the last iterate, ``best`` for checkpoint selection.
+
+    final is the default because it is what the universal-attack papers
+    return, so it adds nothing; best names itself.
+    """
 
     if checkpoint_selection not in CHECKPOINT_SELECTIONS:
         raise ValueError(
             f"checkpoint_selection must be one of {CHECKPOINT_SELECTIONS}, got "
             f"{checkpoint_selection!r}"
         )
-    return "" if checkpoint_selection == "best" else "final"
+    return "" if checkpoint_selection == "final" else "best"
 
 
 def checkpoint_selection_setting() -> str:
-    """``best`` keeps the lowest-scoring iterate; ``final`` keeps the last."""
+    """``final`` keeps the last iterate; ``best`` selects on attack-train."""
 
-    selection = os.environ.get("CHECKPOINT_SELECTION", "best").strip().lower()
+    selection = os.environ.get("CHECKPOINT_SELECTION", "final").strip().lower()
     if selection not in CHECKPOINT_SELECTIONS:
         raise ValueError(
             f"CHECKPOINT_SELECTION must be one of {CHECKPOINT_SELECTIONS}, got "
@@ -231,7 +235,7 @@ def compose_setup_id(
     step_size_schedule: str = "constant",
     margin_hinge_displacement: float | None = None,
     momentum_decay: float = 0.0,
-    checkpoint_selection: str = "best",
+    checkpoint_selection: str = "final",
 ) -> str:
     """Build the canonical ID for one effective configuration.
 
@@ -285,7 +289,7 @@ def effective_setup_id(
     step_size_schedule: str = "constant",
     margin_hinge_displacement: float | None = None,
     momentum_decay: float = 0.0,
-    checkpoint_selection: str = "best",
+    checkpoint_selection: str = "final",
 ) -> str:
     """Canonical ID for a catalog entry after any epoch/fraction override.
 

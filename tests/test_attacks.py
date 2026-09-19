@@ -773,10 +773,10 @@ class CheckpointSelectionTests(unittest.TestCase):
             best.selected_diagnostic_loss, best.initial_losses["total"] + 1e-9
         )
 
-    def test_the_default_is_best(self) -> None:
+    def test_the_default_is_final(self) -> None:
         from adversarial_harness.config import AttackConfig as Config
 
-        self.assertEqual(Config().checkpoint_selection, "best")
+        self.assertEqual(Config().checkpoint_selection, "final")
 
     def test_the_per_image_path_takes_the_same_switch(self) -> None:
         images = torch.full((2, 3, 2, 2), 0.4)

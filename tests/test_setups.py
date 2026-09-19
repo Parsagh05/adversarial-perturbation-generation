@@ -544,24 +544,31 @@ class CheckpointSelectionIdTests(unittest.TestCase):
     def _setup(self):
         return SETUPS[f"{BASE}_eps4"]
 
-    def test_best_is_the_default_and_adds_nothing(self) -> None:
+    def test_final_is_the_default_and_adds_nothing(self) -> None:
         self.assertEqual(effective_setup_id(self._setup()), f"{BASE}_eps4")
-
-    def test_final_names_itself(self) -> None:
         self.assertEqual(
             effective_setup_id(
                 self._setup(), None, 1.0, "balanced", None, "constant", None,
                 0.0, "final",
             ),
-            f"{BASE}_eps4_final",
+            f"{BASE}_eps4",
+        )
+
+    def test_best_names_itself(self) -> None:
+        self.assertEqual(
+            effective_setup_id(
+                self._setup(), None, 1.0, "balanced", None, "constant", None,
+                0.0, "best",
+            ),
+            f"{BASE}_eps4_best",
         )
 
     def test_it_composes_with_the_other_switches(self) -> None:
         derived = effective_setup_id(
             self._setup(), None, 1.0, "balanced", None, "constant", 0.25, 0.9,
-            "final",
+            "best",
         )
-        self.assertEqual(derived, f"{BASE}_eps4_hinge0p25_mom0p9_final")
+        self.assertEqual(derived, f"{BASE}_eps4_hinge0p25_mom0p9_best")
 
     def test_unknown_selections_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "checkpoint_selection"):
@@ -570,14 +577,14 @@ class CheckpointSelectionIdTests(unittest.TestCase):
                 0.0, "last",
             )
 
-    def test_the_environment_setting_defaults_to_best(self) -> None:
+    def test_the_environment_setting_defaults_to_final(self) -> None:
         from setup_catalog import checkpoint_selection_setting
 
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CHECKPOINT_SELECTION", None)
-            self.assertEqual(checkpoint_selection_setting(), "best")
-        with mock.patch.dict(os.environ, {"CHECKPOINT_SELECTION": "FINAL"}):
             self.assertEqual(checkpoint_selection_setting(), "final")
+        with mock.patch.dict(os.environ, {"CHECKPOINT_SELECTION": "BEST"}):
+            self.assertEqual(checkpoint_selection_setting(), "best")
         with mock.patch.dict(os.environ, {"CHECKPOINT_SELECTION": "last"}):
             with self.assertRaises(ValueError):
                 checkpoint_selection_setting()

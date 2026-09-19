@@ -70,12 +70,12 @@ class AttackConfig:
     # sign-PGD, since m then equals g. 1.0 never forgets, which is MI-FGSM's
     # convention and cancels margin_hinge_displacement.
     momentum_decay: float = 0.0
-    # Which iterate the optimization returns. "best" keeps the lowest-scoring
-    # delta over the attack-train cohort, with the clean delta as the baseline,
-    # so a run that never beats clean returns zeros. "final" returns the last
-    # step, which is what the universal-attack papers do. The trajectory is the
-    # same either way; only the retained point differs.
-    checkpoint_selection: str = "best"
+    # Which iterate the optimization returns. "final" is the last step, as
+    # every universal-attack paper does, and is the default. "best" keeps the
+    # lowest-scoring delta over the attack-train cohort, with the clean delta
+    # as the baseline, so a run that never beats clean returns zeros. The
+    # trajectory is the same either way; only the retained point differs.
+    checkpoint_selection: str = "final"
     step_size_schedule: str = "constant"
     step_size_min_ratio: float = 0.1
     diagnostic_interval: int = 10
