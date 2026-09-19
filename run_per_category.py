@@ -35,7 +35,6 @@ torch.backends.cudnn.benchmark = True
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 WORKING = Path(os.environ["WORK_DIR"]).expanduser().resolve()
-OUTPUT_BASE = Path(os.environ["OUTPUT_BASE"]).expanduser().resolve()
 ANOMALYCLIP_ROOT = WORKING / "AnomalyCLIP"
 MVTEC_ROOT = Path(os.environ["MVTEC_ROOT"]).expanduser().resolve()
 VISA_ROOT = Path(os.environ["VISA_ROOT"]).expanduser().resolve()
