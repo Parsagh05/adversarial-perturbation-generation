@@ -41,7 +41,12 @@ def _launcher_table(**overrides: str) -> list[list[str]]:
         [sys.executable, "-c", snippet.group(1)],
         capture_output=True, text=True, cwd=root, check=True, env=environment,
     )
-    return [line.split("\t") for line in completed.stdout.strip().splitlines()]
+    # Strip newlines only: a row's last field is empty when the setup emits
+    # no snapshots, and a bare strip() would eat it off the final row.
+    return [
+        line.split("\t")
+        for line in completed.stdout.strip("\n").splitlines()
+    ]
 
 
 class SetupCatalogTests(unittest.TestCase):
@@ -242,6 +247,7 @@ class ShellLauncherTests(unittest.TestCase):
                 str(setup.image_epochs), setup.epsilon_label,
                 setup.loss_formulation, setup.prompt_mode,
                 effective_setup_id(setup, full_data_cross=True),
+                "",
             ]
             for setup_id, setup in SETUPS.items()
         ]
@@ -797,3 +803,87 @@ class UnusedCrossBudgetTests(unittest.TestCase):
         # The bare catalog does not know the mode yet, so it must not drop a
         # component that fullcross would need.
         self.assertIn("cross5", self._name("7.14:5:100:100", None))
+
+
+class SnapshotLauncherTests(unittest.TestCase):
+    """A snapshot budget is emitted as an ordinary row, so nothing special-cases it."""
+
+    def _rows(self, **overrides):
+        return _launcher_table(
+            SETUP_EPOCHS="20:400:400",
+            STEP_SIZE_SCHEDULE="constant",
+            PROMPT_SETUP="frozen",
+            **overrides,
+        )
+
+    def test_no_snapshot_rows_by_default(self) -> None:
+        rows = self._rows(SNAPSHOT_EPOCHS="")
+        self.assertTrue(all(row[8].startswith("ep20_") for row in rows))
+        self.assertTrue(all(row[9] == "" for row in rows))
+
+    def test_each_budget_gets_its_own_row_and_directory(self) -> None:
+        rows = self._rows(SNAPSHOT_EPOCHS="5:100:100,10:200:200")
+        names = [row[8] for row in rows]
+        self.assertTrue(any(name.startswith("ep5_cat100_img100_") for name in names))
+        self.assertTrue(any(name.startswith("ep10_cat200_img200_") for name in names))
+        self.assertTrue(any(name.startswith("ep20_cat400_img400_") for name in names))
+
+    def test_the_longest_budget_runs_before_the_budgets_it_produces(self) -> None:
+        # The shorter budgets reuse deltas the longer run writes, so their rows
+        # must come after it.
+        rows = self._rows(SNAPSHOT_EPOCHS="5:100:100")
+        first = rows[0]
+        self.assertTrue(first[8].startswith("ep20_"))
+        self.assertTrue(rows[1][8].startswith("ep5_"))
+
+    def test_only_the_producing_row_carries_the_snapshot_spec(self) -> None:
+        rows = self._rows(SNAPSHOT_EPOCHS="5:100:100")
+        self.assertIn("ep5_cat100_img100", rows[0][9])
+        self.assertEqual(rows[1][9], "")
+
+    def test_a_snapshot_row_keeps_the_parent_catalog_id(self) -> None:
+        # So RUN_SETUPS selection reaches the snapshots of a selected setup.
+        rows = self._rows(SNAPSHOT_EPOCHS="5:100:100")
+        self.assertEqual(rows[0][0], rows[1][0])
+
+    def test_a_budget_longer_than_the_run_is_refused(self) -> None:
+        with self.assertRaises(subprocess.CalledProcessError):
+            self._rows(SNAPSHOT_EPOCHS="25:100:100")
+
+
+class SnapshotTargetParsingTests(unittest.TestCase):
+    """The launcher owns the naming; runners only read absolute roots."""
+
+    def _targets(self, value: str):
+        from setup_catalog import snapshot_targets
+
+        with mock.patch.dict(os.environ, {"SNAPSHOT_SETUP_ROOTS": value}):
+            return snapshot_targets()
+
+    def test_empty_means_no_snapshots(self) -> None:
+        for value in ("", ";", "  "):
+            with self.subTest(value=value):
+                self.assertEqual(self._targets(value), ())
+
+    def test_entries_carry_a_budget_and_a_root(self) -> None:
+        self.assertEqual(
+            self._targets("5:5:100:100=/out/ep5;10:10:200:200=/out/ep10"),
+            (
+                ((5.0, 5.0, 100.0, 100.0), "/out/ep5"),
+                ((10.0, 10.0, 200.0, 200.0), "/out/ep10"),
+            ),
+        )
+
+    def test_a_malformed_entry_is_refused(self) -> None:
+        for value in ("5:100=/out/ep5", "5:5:100:100", "5:5:100:100="):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    self._targets(value)
+
+    def test_every_runner_reads_the_shared_parser(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for name in ("run_per_dataset.py", "run_per_category.py", "run_per_image.py"):
+            with self.subTest(runner=name):
+                source = (root / name).read_text(encoding="utf-8")
+                self.assertIn("snapshot_targets", source)
+                self.assertIn("write_snapshot_artifact", source)

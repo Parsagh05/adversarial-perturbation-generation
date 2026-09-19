@@ -527,8 +527,19 @@ class TargetedPGD:
         target_label: int,
         mode: str,
         spatial_masks: Optional[torch.Tensor] = None,
+        snapshot_steps: Sequence[int] = (),
+        snapshot_sink: Optional[Dict[int, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Optimize independent per-image perturbations for a batch."""
+        """Optimize independent per-image perturbations for a batch.
+
+        ``snapshot_sink`` receives, per listed step, the deltas this call would
+        have returned had ``steps`` been set to that value. The return shape is
+        unchanged so existing callers are untouched.
+        """
+
+        wanted_snapshots = {
+            int(step) for step in snapshot_steps if 0 < int(step) < self.config.steps
+        }
 
         clean = clean_images.to(self.device)
         masks = spatial_masks.to(self.device) if spatial_masks is not None else None
@@ -561,6 +572,12 @@ class TargetedPGD:
             if current_loss < best_loss:
                 best_loss = current_loss
                 best_delta = delta.detach().clone()
+            if step in wanted_snapshots and snapshot_sink is not None:
+                snapshot_sink[step] = (
+                    delta.detach().clone()
+                    if self.config.checkpoint_selection == "final"
+                    else best_delta.detach().clone()
+                )
             gradient = torch.autograd.grad(loss, delta, only_inputs=True)[0]
             # Targeted PGD minimizes the requested global/local objective.
             step_size = self.step_size_at(step, self.config.steps)

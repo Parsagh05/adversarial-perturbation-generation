@@ -276,6 +276,27 @@ def snapshot_steps(
     )
 
 
+def snapshot_targets() -> tuple[tuple[tuple[float, float, float, float], str], ...]:
+    """``((dataset, cross, category, image), setup root)`` from the launcher.
+
+    Each entry is a shorter budget the current run also produces. The launcher
+    owns the naming and hands over absolute roots, so a runner never composes a
+    setup ID of its own.
+    """
+
+    raw = os.environ.get("SNAPSHOT_SETUP_ROOTS", "").strip().strip(";")
+    targets = []
+    for entry in raw.split(";"):
+        if not entry.strip():
+            continue
+        budget, _, root = entry.partition("=")
+        values = tuple(float(part) for part in budget.split(":"))
+        if len(values) != 4 or not root:
+            raise ValueError(f"Malformed SNAPSHOT_SETUP_ROOTS entry: {entry!r}")
+        targets.append((values, root))
+    return tuple(targets)
+
+
 def _epoch_number(value: float) -> str:
     """``7.14`` -> ``7p14``; keeps fractional budgets filesystem-safe."""
 

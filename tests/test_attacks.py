@@ -880,3 +880,51 @@ class SnapshotEquivalenceTests(unittest.TestCase):
 
     def test_no_snapshots_by_default(self) -> None:
         self.assertEqual(self._run(5, "final").snapshots, {})
+
+
+class PerImageSnapshotEquivalenceTests(unittest.TestCase):
+    """A per-image snapshot must equal a standalone shorter per-image run."""
+
+    def _run(self, steps, selection, snapshot_steps=(), sink=None):
+        torch.manual_seed(99)
+        attacker = TargetedPGD(
+            _DifferentiableFakeSurrogate(),
+            AttackConfig(
+                temperature=1.0,
+                image_size=2,
+                epsilon=0.2,
+                step_size=0.05,
+                steps=steps,
+                random_start=True,
+                step_size_schedule="constant",
+                checkpoint_selection=selection,
+            ),
+        )
+        images = torch.stack(
+            [torch.full((3, 2, 2), value) for value in (0.2, 0.55, 0.8)]
+        )
+        _, delta = attacker.perturb_batch(
+            images, ["object"] * 3, 1, "global",
+            snapshot_steps=snapshot_steps, snapshot_sink=sink,
+        )
+        return delta
+
+    def test_a_snapshot_equals_a_standalone_run(self) -> None:
+        for selection in ("final", "best"):
+            for budget in (3, 6):
+                with self.subTest(selection=selection, budget=budget):
+                    standalone = self._run(budget, selection)
+                    sink: dict = {}
+                    self._run(10, selection, snapshot_steps=(3, 6), sink=sink)
+                    self.assertEqual(
+                        _delta_sha256(standalone), _delta_sha256(sink[budget])
+                    )
+
+    def test_snapshots_do_not_disturb_the_run(self) -> None:
+        plain = self._run(10, "final")
+        sink: dict = {}
+        snapped = self._run(10, "final", snapshot_steps=(3, 6), sink=sink)
+        self.assertEqual(_delta_sha256(plain), _delta_sha256(snapped))
+
+    def test_no_sink_means_no_capture(self) -> None:
+        self._run(10, "final", snapshot_steps=(3,))

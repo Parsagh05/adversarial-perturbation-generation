@@ -45,7 +45,11 @@ SETUP_ID = os.environ["SETUP_ID"]
 if not ANOMALYCLIP_ROOT.exists():
     raise FileNotFoundError(ANOMALYCLIP_ROOT)
 
-from setup_catalog import checkpoint_selection_setting, derive_steps
+from setup_catalog import (
+    checkpoint_selection_setting,
+    derive_steps,
+    snapshot_targets,
+)
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import MVTecSample, discover_anomaly_datasets, load_image_tensor, load_mask
@@ -125,6 +129,16 @@ STEP_SIZE = parse_numeric(os.environ["PER_IMAGE_STEP_SIZE"])
 # step and the two units coincide.
 PER_IMAGE_EPOCHS = float(os.environ["PER_IMAGE_EPOCHS"])
 PER_IMAGE_STEPS = derive_steps(PER_IMAGE_EPOCHS, 1, 1)
+# Shorter budgets this run also produces. A per-image delta trains on one
+# image, so an epoch is a step and the image component maps straight across.
+SNAPSHOT_TARGETS = [
+    (budget, Path(root).expanduser().resolve())
+    for budget, root in snapshot_targets()
+]
+SNAPSHOT_IMAGE_STEPS = {
+    derive_steps(budget[3], 1, 1): (budget, root)
+    for budget, root in SNAPSHOT_TARGETS
+}
 EFFECTIVE_BATCH_SIZE = int(os.environ.get("PER_IMAGE_EFFECTIVE_BATCH_SIZE", "2"))
 MICRO_BATCH_SIZE = int(os.environ.get("PER_IMAGE_MICRO_BATCH_SIZE", "2"))
 LOCAL_FOCAL_WEIGHT = float(os.environ.get("LOCAL_FOCAL_WEIGHT", "0.5"))
@@ -267,6 +281,7 @@ def run_logical_batch(attacker, batch_samples, target_label, loss_mode):
     while True:
         try:
             output_deltas = []
+            snapshot_deltas = {steps: [] for steps in SNAPSHOT_IMAGE_STEPS}
             diagnostic_batches = []
             for micro in chunked(list(batch_samples), micro_batch_size):
                 clean = torch.stack([image_loader(s) for s in micro]).float()
@@ -287,13 +302,21 @@ def run_logical_batch(attacker, batch_samples, target_label, loss_mode):
                                 masks.to(attacker.device) if masks is not None else None
                             ),
                         )
+                    micro_snapshots = {}
                     adversarial, delta = attacker.perturb_batch(
                         clean,
                         [s.category for s in micro],
                         target_label,
                         loss_mode,
                         spatial_masks=masks,
+                        snapshot_steps=tuple(SNAPSHOT_IMAGE_STEPS),
+                        snapshot_sink=micro_snapshots,
                     )
+                    for steps, captured in micro_snapshots.items():
+                        snapshot_deltas[steps].extend(
+                            captured[index].detach().cpu()
+                            for index in range(captured.shape[0])
+                        )
                     with torch.no_grad():
                         final_components = attacker.objective_components(
                             adversarial,
@@ -345,15 +368,52 @@ def aggregate_diagnostics(batches):
         for phase in ("initial", "final")
     }
 
-def artifact_path(dataset: str, category: str, direction: str, loss_mode: str):
+def artifact_path(
+    dataset: str, category: str, direction: str, loss_mode: str,
+    root: Path | None = None,
+):
     root = (
-        OUTPUT_ROOT
+        (OUTPUT_ROOT if root is None else root)
         / "noises"
         / dataset
         / "perturbations"
         / f"per_image__{direction}__{loss_mode}"
     )
     return root / f"{category}.pt"
+
+
+def write_snapshot_artifact(
+    captured, sample_ids, metadata, snapshot_epochs, snapshot_steps, root,
+    dataset_name, category, direction, loss_mode,
+):
+    """Write one shorter budget's per-image deltas into the directory it owns.
+
+    Per-image has no training cohort, so there are no diagnostics to recompute:
+    the recorded losses already describe each image against itself. Only the
+    budget and the deltas differ from the run that produced them.
+    """
+
+    path = artifact_path(
+        dataset_name, category, direction, loss_mode,
+        root=root / "canonical_clip_per_image",
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_metadata = {
+        **metadata,
+        "optimization_epochs": snapshot_epochs,
+        "per_image_steps": snapshot_steps,
+        "actual_linf": float(captured.abs().max()),
+        "snapshot_of_optimization_epochs": metadata["optimization_epochs"],
+    }
+    torch.save(
+        {
+            "deltas": captured.half(),
+            "sample_ids": sample_ids,
+            "metadata": snapshot_metadata,
+        },
+        path,
+    )
+    print(f"[snapshot] {snapshot_epochs} epochs {category} -> {path}")
 
 
 def reusable(pt_path: Path, expected: dict) -> bool:

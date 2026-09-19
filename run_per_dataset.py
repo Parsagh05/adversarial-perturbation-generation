@@ -48,6 +48,7 @@ from setup_catalog import (
     margin_hinge_setting,
     momentum_decay_setting,
     checkpoint_selection_setting,
+    snapshot_targets,
 )
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
@@ -132,6 +133,12 @@ PER_DATASET_EPOCHS = float(os.environ["PER_DATASET_EPOCHS"])
 PER_CROSS_EPOCHS = float(
     os.environ.get("PER_CROSS_EPOCHS", "") or PER_DATASET_EPOCHS
 )
+
+
+SNAPSHOT_TARGETS = [
+    (budget, Path(root).expanduser().resolve())
+    for budget, root in snapshot_targets()
+]
 UNIVERSAL_BATCH_SIZE = int(os.environ.get("PER_DATASET_BATCH_SIZE", "1"))
 LOCAL_FOCAL_WEIGHT = float(os.environ.get("LOCAL_FOCAL_WEIGHT", "0.5"))
 LOCAL_DICE_WEIGHT = float(os.environ.get("LOCAL_DICE_WEIGHT", "0.5"))
@@ -288,10 +295,10 @@ def source_training_samples(source_dataset: str, source_label: int, pool, full: 
 
 def artifact_path(
     source_dataset: str, fraction: float, direction: str, loss_mode: str,
-    partition_key: str = "",
+    partition_key: str = "", root: Path | None = None,
 ):
     root = (
-        OUTPUT_ROOT
+        (OUTPUT_ROOT if root is None else root)
         / "noises"
         / source_dataset
         / fraction_tag(fraction)
@@ -300,6 +307,65 @@ def artifact_path(
     if partition_key:
         root = root / partition_key
     return root / f"dataset__{direction}__{loss_mode}.pt"
+
+
+def write_snapshot_artifact(
+    captured, metadata, attacker, source_train, target_label, loss_mode,
+    snapshot_epochs, snapshot_steps, root, source_dataset, fraction, direction,
+    partition_key,
+):
+    """Write one shorter budget's delta into the setup directory it owns.
+
+    The launcher replays that budget as an ordinary setup afterwards. Its
+    reuse guard compares configuration rather than results, so the epoch count
+    and derived step count are what must describe the snapshot rather than the
+    run that produced it. The diagnostics are recomputed on the captured delta
+    so the recorded provenance describes it too, and the history is truncated
+    to the steps the shorter run would have taken.
+    """
+
+    path = artifact_path(
+        source_dataset, fraction, direction, loss_mode, partition_key,
+        root=root / "canonical_clip_per_dataset",
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    final_losses = attacker._diagnostic_losses(
+        source_train, image_loader, captured, target_label, loss_mode,
+        mask_loader=(
+            mask_loader
+            if LOSS_FORMULATION == "ce_focal_dice"
+            and loss_mode in {"local", "combined"}
+            else None
+        ),
+    )
+    snapshot_metadata = {
+        **metadata,
+        "optimization_epochs": snapshot_epochs,
+        "universal_steps": snapshot_steps,
+        "final_losses": final_losses,
+        "loss_reduction": {
+            key: metadata["initial_losses"][key] - final_losses[key]
+            for key in metadata["initial_losses"]
+            if key in final_losses
+        },
+        "optimization_history": [
+            row for row in metadata["optimization_history"]
+            if float(row["step"]) <= snapshot_steps
+        ],
+        "selected_step": (
+            snapshot_steps
+            if attacker.config.checkpoint_selection == "final"
+            else min(int(metadata["selected_step"]), snapshot_steps)
+        ),
+        "selected_diagnostic_loss": final_losses["total"],
+        "actual_linf": float(captured.abs().max()),
+        "delta_sha256_float32": sha256_tensor(captured),
+        "snapshot_of_optimization_epochs": metadata["optimization_epochs"],
+    }
+    torch.save(
+        {"delta": captured.half(), "metadata": snapshot_metadata}, path
+    )
+    print(f"[snapshot] {snapshot_epochs} epochs -> {path}")
 
 
 def reusable(pt_path: Path, expected: Dict) -> bool:
@@ -391,6 +457,16 @@ for source_dataset in SOURCE_DATASETS:
                 condition_steps = derive_steps(
                     condition_epochs, max(len(source_train), 1), UNIVERSAL_BATCH_SIZE
                 )
+                # The cross delta trains on its own cohort, so a snapshot
+                # budget maps through the same derivation the run itself uses.
+                snapshot_budgets = {
+                    derive_steps(
+                        budget[1] if use_full_source else budget[0],
+                        max(len(source_train), 1),
+                        UNIVERSAL_BATCH_SIZE,
+                    ): (budget, root)
+                    for budget, root in SNAPSHOT_TARGETS
+                }
                 condition_config = replace(
                     condition_config, universal_steps=condition_steps
                 )
@@ -508,6 +584,7 @@ for source_dataset in SOURCE_DATASETS:
                             ),
                             diagnostic_samples=source_train,
                             progress=progress,
+                            snapshot_steps=tuple(snapshot_budgets),
                         )
                         bar.close()
                         delta = result.delta.detach().cpu().float()
@@ -577,6 +654,25 @@ for source_dataset in SOURCE_DATASETS:
                             ),
                         }
                         torch.save({"delta": delta.half(), "metadata": metadata}, pt_path)
+                        for steps, (budget, root) in snapshot_budgets.items():
+                            captured = result.snapshots.get(steps)
+                            if captured is None:
+                                continue
+                            write_snapshot_artifact(
+                                captured,
+                                metadata,
+                                attacker,
+                                source_train,
+                                target_label,
+                                loss_mode,
+                                budget[1] if use_full_source else budget[0],
+                                steps,
+                                root,
+                                source_dataset,
+                                fraction,
+                                direction,
+                                partition_key,
+                            )
                         del result, attacker, delta
                         release_cuda()
 

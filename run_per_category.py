@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import zipfile
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -51,6 +51,7 @@ from setup_catalog import (
     margin_hinge_setting,
     momentum_decay_setting,
     checkpoint_selection_setting,
+    snapshot_targets,
 )
 from adversarial_harness.attacks import TargetedPGD, direction_labels
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
@@ -145,6 +146,12 @@ NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
 STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "constant")
 MARGIN_HINGE_DISPLACEMENT = margin_hinge_setting()
 MOMENTUM_DECAY = momentum_decay_setting()
+# Shorter budgets this run also produces, each into the setup directory the
+# launcher assigned it. A category delta uses the category component.
+SNAPSHOT_TARGETS = [
+    (budget, Path(root).expanduser().resolve())
+    for budget, root in snapshot_targets()
+]
 CHECKPOINT_SELECTION = checkpoint_selection_setting()
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "8"))
@@ -268,6 +275,8 @@ class AccumulatedResult:
     diagnostic_sample_ids: list[str]
     selected_step: int
     selected_diagnostic_loss: float
+    # step -> the delta this run would have returned had it stopped there.
+    snapshots: dict[int, torch.Tensor] = field(default_factory=dict)
 
 
 def optimize_accumulated(
@@ -279,6 +288,7 @@ def optimize_accumulated(
     total_steps: int,
     mask_fn=None,
     progress=None,
+    snapshot_steps=(),
 ):
     """Universal PGD with gradient accumulation and automatic OOM fallback."""
     if not source_samples:
@@ -300,6 +310,10 @@ def optimize_accumulated(
     # A category delta is shared too, so it accumulates the same way
     # optimize_universal does. Zero decay leaves this as plain sign-PGD.
     momentum = torch.zeros_like(delta)
+    wanted_snapshots = {
+        int(step) for step in snapshot_steps if 0 < int(step) < total_steps
+    }
+    snapshots = {}
 
     order = np.arange(len(source_samples))
     cursor = len(order)
@@ -396,6 +410,7 @@ def optimize_accumulated(
                     step == 0
                     or (step + 1) % DIAGNOSTIC_INTERVAL == 0
                     or step + 1 == total_steps
+                    or (step + 1) in wanted_snapshots
                 ):
                     fixed_losses = attacker._diagnostic_losses(
                         diagnostic_samples,
@@ -409,6 +424,12 @@ def optimize_accumulated(
                         best_diagnostic_loss = fixed_losses["total"]
                         best_delta = delta.detach().clone()
                         selected_step = step + 1
+                if (step + 1) in wanted_snapshots:
+                    snapshots[step + 1] = (
+                        delta.detach().clone()
+                        if attacker.config.checkpoint_selection == "final"
+                        else best_delta.detach().clone()
+                    )
                 record = {
                     "step": float(step + 1),
                     "batch_pre_total_loss": pre_loss,
@@ -469,12 +490,72 @@ def optimize_accumulated(
             if attacker.config.checkpoint_selection == "final"
             else best_diagnostic_loss
         ),
+        snapshots=snapshots,
     )
 
-def artifact_path(dataset: str, category: str, fraction: float, direction: str, loss_mode: str):
-    root = OUTPUT_ROOT / "noises" / dataset / fraction_tag(fraction) / "perturbations"
+def artifact_path(
+    dataset: str, category: str, fraction: float, direction: str,
+    loss_mode: str, root: Path | None = None,
+):
+    root = (OUTPUT_ROOT if root is None else root) / "noises" / dataset / fraction_tag(fraction) / "perturbations"
     name = f"per_category__{direction}__{loss_mode}__{category}.pt"
     return root / name
+
+
+def write_snapshot_artifact(
+    captured, metadata, attacker, train_samples, target_label, loss_mode,
+    snapshot_epochs, snapshot_steps, root, dataset_name, category, fraction,
+    direction,
+):
+    """Write one shorter budget's category delta into the directory it owns.
+
+    Mirrors run_per_dataset.py: the launcher replays that budget as an ordinary
+    setup afterwards, and its reuse guard compares configuration, so the epoch
+    count and derived step count must describe the snapshot. Diagnostics are
+    recomputed on the captured delta and the history truncated, so the recorded
+    provenance describes the shorter run rather than the one that produced it.
+    """
+
+    path = artifact_path(
+        dataset_name, category, fraction, direction, loss_mode,
+        root=root / "canonical_clip_per_category",
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    final_losses = attacker._diagnostic_losses(
+        train_samples, image_loader, captured, target_label, loss_mode,
+        mask_loader=(
+            mask_loader
+            if LOSS_FORMULATION == "ce_focal_dice"
+            and loss_mode in {"local", "combined"}
+            else None
+        ),
+    )
+    snapshot_metadata = {
+        **metadata,
+        "optimization_epochs": snapshot_epochs,
+        "universal_steps": snapshot_steps,
+        "final_losses": final_losses,
+        "loss_reduction": {
+            key: metadata["initial_losses"][key] - final_losses[key]
+            for key in metadata["initial_losses"]
+            if key in final_losses
+        },
+        "optimization_history": [
+            row for row in metadata["optimization_history"]
+            if float(row["step"]) <= snapshot_steps
+        ],
+        "selected_step": (
+            snapshot_steps
+            if attacker.config.checkpoint_selection == "final"
+            else min(int(metadata["selected_step"]), snapshot_steps)
+        ),
+        "selected_diagnostic_loss": final_losses["total"],
+        "actual_linf": float(captured.abs().max()),
+        "delta_sha256_float32": sha256_tensor(captured),
+        "snapshot_of_optimization_epochs": metadata["optimization_epochs"],
+    }
+    torch.save({"delta": captured.half(), "metadata": snapshot_metadata}, path)
+    print(f"[snapshot] {snapshot_epochs} epochs {category} -> {path}")
 
 
 def reusable(pt_path: Path, expected: Dict) -> bool:
@@ -581,6 +662,14 @@ for dataset_name in DATASETS:
                         max(len(train_samples), 1),
                         EFFECTIVE_BATCH_SIZE,
                     )
+                    snapshot_budgets = {
+                        derive_steps(
+                            budget[2],
+                            max(len(train_samples), 1),
+                            EFFECTIVE_BATCH_SIZE,
+                        ): (budget, root)
+                        for budget, root in SNAPSHOT_TARGETS
+                    }
                     condition_config = replace(
                         condition_config, universal_steps=condition_steps
                     )
@@ -693,6 +782,7 @@ for dataset_name in DATASETS:
                                     else None
                                 ),
                                 progress=progress,
+                                snapshot_steps=tuple(snapshot_budgets),
                             )
                             bar.close()
                             delta = result.delta.detach().cpu().float()
@@ -737,6 +827,16 @@ for dataset_name in DATASETS:
                                 ),
                             }
                             torch.save({"delta": delta.half(), "metadata": metadata}, pt_path)
+                            for steps, (budget, root) in snapshot_budgets.items():
+                                captured = result.snapshots.get(steps)
+                                if captured is None:
+                                    continue
+                                write_snapshot_artifact(
+                                    captured, metadata, attacker, train_samples,
+                                    target_label, loss_mode, budget[2], steps,
+                                    root, dataset_name, category, fraction,
+                                    direction,
+                                )
                             del result, attacker, delta
                             release_cuda()
 
