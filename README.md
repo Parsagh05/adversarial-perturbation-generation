@@ -488,11 +488,23 @@ and twice the compute:
 
 That is what an epoch means, and it may be what you want, but without a
 separate value there is no way to run cross-dataset shorter without also
-shortening per-dataset. The component appears in the name only when it differs
-from the dataset budget, so every existing output name is unchanged, and
-`7.14:5:100:100` gives `ep7p14_cross5_cat100_img100`. Under `halfcross`
-cross-dataset delivers the per-dataset delta and the value is unused. The
-older three-part form still works, with cross inheriting the dataset budget.
+shortening per-dataset.
+
+Setting it is optional. The older three-part form still works, with cross
+inheriting the dataset budget, which is exactly what it used before it had one
+of its own. The component appears in the name only when cross-dataset has a
+budget to spend and it differs from the dataset one:
+
+| `FULL_DATA_CROSS` | `SETUP_EPOCHS` | name |
+|---|---|---|
+| true | `7.14:100:100` | `ep7p14_cat100_img100` |
+| true | `7.14:5:100:100` | `ep7p14_cross5_cat100_img100` |
+| false | either | `ep7p14_cat100_img100` |
+
+Under `halfcross` the value is ignored entirely, because cross-dataset
+delivers the per-dataset delta and optimises nothing. Two such runs produce
+identical artifacts, so they share one directory rather than being split by a
+number that changed nothing.
 
 The default `7.14:100:100` reproduces the historical 800 / 200 / 100 step
 counts exactly at the default batch sizes, and names itself

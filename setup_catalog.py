@@ -287,15 +287,20 @@ def _epochs_tag(
     cross_epochs: float,
     category_epochs: float,
     image_epochs: float,
+    full_data_cross: bool | None = None,
 ) -> str:
     """``ep100`` when every scope agrees, ``ep7p14_cat100_img100`` when not.
 
-    ``_cross`` appears only when cross_dataset differs from the per-dataset
-    budget, so every name predating its own budget is unchanged.
+    ``_cross`` appears only when cross_dataset both has a budget of its own to
+    spend and differs from the per-dataset one. Under ``halfcross`` it spends
+    none, because it delivers the per-dataset delta, so the value changes
+    nothing and must not split the output directory. Every name predating the
+    cross budget is likewise unchanged.
     """
 
     tag = f"ep{_epoch_number(epochs)}"
-    if float(cross_epochs) != float(epochs):
+    cross_is_optimized = full_data_cross is not False
+    if cross_is_optimized and float(cross_epochs) != float(epochs):
         tag = f"{tag}_cross{_epoch_number(cross_epochs)}"
     if float(category_epochs) == float(epochs) and float(image_epochs) == float(epochs):
         return tag
@@ -329,7 +334,9 @@ def compose_setup_id(
     """
 
     parts = [
-        _epochs_tag(epochs, cross_epochs, category_epochs, image_epochs),
+        _epochs_tag(
+            epochs, cross_epochs, category_epochs, image_epochs, full_data_cross
+        ),
         _epsilon_tag(epsilon_label),
     ]
     # margin_topk is the default loss and adds nothing; ce_focal_dice names

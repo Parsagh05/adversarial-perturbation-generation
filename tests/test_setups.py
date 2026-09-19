@@ -760,3 +760,40 @@ class CrossDatasetBudgetTests(unittest.TestCase):
         self.assertIn(
             "PER_CROSS_EPOCHS if use_full_source else PER_DATASET_EPOCHS", source
         )
+
+
+class UnusedCrossBudgetTests(unittest.TestCase):
+    """halfcross spends no cross budget, so the value must not split the name.
+
+    Under halfcross the cross-dataset scope delivers the per-dataset delta and
+    optimizes nothing, so two runs differing only in the cross number produce
+    byte-identical artifacts and must share one output directory.
+    """
+
+    def _name(self, entry: str, full_data_cross: bool) -> str:
+        with mock.patch.dict(os.environ, {"SETUP_EPOCHS": entry}):
+            from setup_catalog import build_setups
+
+            generated = build_setups(
+                epsilons=("4/255",), full_data_cross=full_data_cross
+            )
+        return sorted(generated)[0]
+
+    def test_halfcross_ignores_the_cross_budget_in_the_name(self) -> None:
+        self.assertEqual(
+            self._name("7.14:5:100:100", False),
+            self._name("7.14:100:100", False),
+        )
+        self.assertNotIn("cross5", self._name("7.14:5:100:100", False))
+
+    def test_fullcross_keeps_it(self) -> None:
+        self.assertNotEqual(
+            self._name("7.14:5:100:100", True),
+            self._name("7.14:100:100", True),
+        )
+        self.assertIn("cross5", self._name("7.14:5:100:100", True))
+
+    def test_an_unknown_cross_mode_keeps_it(self) -> None:
+        # The bare catalog does not know the mode yet, so it must not drop a
+        # component that fullcross would need.
+        self.assertIn("cross5", self._name("7.14:5:100:100", None))
