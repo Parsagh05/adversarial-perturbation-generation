@@ -444,7 +444,7 @@ def main() -> None:
         # cross_dataset delivers the per-dataset delta, so it shares its count.
         expected_epochs = {
             "dataset": SMOKE_EPOCHS if SMOKE else setup.epochs,
-            "cross_dataset": SMOKE_EPOCHS if SMOKE else setup.epochs,
+            "cross_dataset": SMOKE_EPOCHS if SMOKE else setup.cross_epochs,
             "per_category": SMOKE_EPOCHS if SMOKE else setup.category_epochs,
             "per_image": SMOKE_EPOCHS if SMOKE else setup.image_epochs,
         }

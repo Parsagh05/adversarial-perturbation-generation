@@ -120,6 +120,7 @@ produced = {}
 for setup_id, setup in SETUPS.items():
     # A smoke override collapses every scope onto one count.
     epochs = setup.epochs if override is None else override
+    cross_epochs = setup.cross_epochs if override is None else override
     category_epochs = setup.category_epochs if override is None else override
     image_epochs = setup.image_epochs if override is None else override
     effective = effective_setup_id(
@@ -137,7 +138,8 @@ for setup_id, setup in SETUPS.items():
         continue
     produced[effective] = setup_id
     print("\t".join((
-        setup_id, str(epochs), str(category_epochs), str(image_epochs),
+        setup_id, str(epochs), str(cross_epochs), str(category_epochs),
+        str(image_epochs),
         setup.epsilon_label, setup.loss_formulation, setup.prompt_mode,
         effective,
     )))
@@ -188,7 +190,7 @@ selected() {
 }
 
 selected_count=0
-while IFS=$'\t' read -r id _ _ _ _ _ prompt_mode _; do
+while IFS=$'\t' read -r id _ _ _ _ _ _ prompt_mode _; do
   if selected "$id" "$prompt_mode"; then
     selected_count=$((selected_count + 1))
   fi
@@ -198,7 +200,7 @@ done <<< "$SETUP_TABLE"
   exit 2
 }
 
-while IFS=$'\t' read -r id epochs category_epochs image_epochs epsilon loss_formulation prompt_mode effective_id; do
+while IFS=$'\t' read -r id epochs cross_epochs category_epochs image_epochs epsilon loss_formulation prompt_mode effective_id; do
   selected "$id" "$prompt_mode" || continue
   if [[ "$prompt_mode" == "frozen_winclip" ]]; then
     prompt_folder="frozen_prompt"
@@ -208,7 +210,7 @@ while IFS=$'\t' read -r id epochs category_epochs image_epochs epsilon loss_form
   # $epochs already carries the smoke override, and $effective_id is derived
   # from it, so the directory name can never describe different parameters.
   setup_root="$PIPELINE_OUTPUT/setups/$prompt_folder/$effective_id"
-  echo "===== SETUP $effective_id (requested $id): prompt=$prompt_mode loss=$loss_formulation epochs=dataset:$epochs/category:$category_epochs/image:$image_epochs epsilon=$epsilon fraction=$ATTACK_TRAIN_FRACTION ====="
+  echo "===== SETUP $effective_id (requested $id): prompt=$prompt_mode loss=$loss_formulation epochs=dataset:$epochs/cross:$cross_epochs/category:$category_epochs/image:$image_epochs epsilon=$epsilon fraction=$ATTACK_TRAIN_FRACTION ====="
   (
     export OUTPUT_BASE="$setup_root"
     export SETUP_ID="$effective_id"
@@ -223,6 +225,7 @@ while IFS=$'\t' read -r id epochs category_epochs image_epochs epsilon loss_form
     # its own training-set size. cross_dataset has no separate budget: halfcross
     # reuses the per-dataset delta and fullcross uses the per-dataset budget.
     export PER_DATASET_EPOCHS="$epochs"
+    export PER_CROSS_EPOCHS="$cross_epochs"
     export PER_CATEGORY_EPOCHS="$category_epochs"
     export PER_IMAGE_EPOCHS="$image_epochs"
     export PER_DATASET_STEP_SIZE="$INITIAL_STEP_SIZE"

@@ -126,6 +126,12 @@ IMAGE_SIZE = int(os.environ.get("IMAGE_SIZE", "518"))
 EPSILON = parse_numeric(os.environ["EPSILON"])
 STEP_SIZE = parse_numeric(os.environ["PER_DATASET_STEP_SIZE"])
 PER_DATASET_EPOCHS = float(os.environ["PER_DATASET_EPOCHS"])
+# The fullsource delta trains on the complete source rather than the
+# attack_train half, so it gets its own budget. Defaults to the per-dataset
+# one, which is what it used before it had one.
+PER_CROSS_EPOCHS = float(
+    os.environ.get("PER_CROSS_EPOCHS", "") or PER_DATASET_EPOCHS
+)
 UNIVERSAL_BATCH_SIZE = int(os.environ.get("PER_DATASET_BATCH_SIZE", "1"))
 LOCAL_FOCAL_WEIGHT = float(os.environ.get("LOCAL_FOCAL_WEIGHT", "0.5"))
 LOCAL_DICE_WEIGHT = float(os.environ.get("LOCAL_DICE_WEIGHT", "0.5"))
@@ -379,8 +385,11 @@ for source_dataset in SOURCE_DATASETS:
                 source_train = source_training_samples(
                     source_dataset, source_label, fraction_pool, use_full_source
                 )
+                condition_epochs = (
+                    PER_CROSS_EPOCHS if use_full_source else PER_DATASET_EPOCHS
+                )
                 condition_steps = derive_steps(
-                    PER_DATASET_EPOCHS, max(len(source_train), 1), UNIVERSAL_BATCH_SIZE
+                    condition_epochs, max(len(source_train), 1), UNIVERSAL_BATCH_SIZE
                 )
                 condition_config = replace(
                     condition_config, universal_steps=condition_steps
@@ -406,7 +415,7 @@ for source_dataset in SOURCE_DATASETS:
                         "attack_train_fraction": fraction,
                         "epsilon": EPSILON,
                         "step_size": STEP_SIZE,
-                        "optimization_epochs": PER_DATASET_EPOCHS,
+                        "optimization_epochs": condition_epochs,
                         "universal_steps": condition_steps,
                         "universal_batch_size": UNIVERSAL_BATCH_SIZE,
                         "image_size": IMAGE_SIZE,

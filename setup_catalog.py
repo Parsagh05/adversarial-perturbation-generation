@@ -6,9 +6,11 @@ entry, so widening a sweep means editing one list. ``SETUP_EPOCHS`` holds one
 different problems: a per-dataset delta must satisfy hundreds of images at
 once, a per-category delta about a dozen, and a per-image delta exactly one.
 ``SETUP_EPOCHS=7.14:100:100,5:60:50`` sweeps two such settings. A bare ``100``
-means all three scopes use 100. Cross-dataset takes no value of its own: it
-either delivers the per-dataset delta (``halfcross``) or uses the same epoch
-budget for its complete-cohort delta (``fullcross``).
+means every scope uses 100. A fourth component gives cross-dataset its own
+budget (``dataset:cross:category:image``), which is used only by ``fullcross``,
+where it optimizes a separate delta on the complete source; ``halfcross``
+delivers the per-dataset delta and has nothing to budget. The three-part form
+still works, with cross inheriting the dataset budget.
 
 An epoch is one pass over whatever that delta trains on, so the PGD step count
 is derived at run time as ``ceil(epochs * ceil(n_images / batch))``. That keeps
@@ -31,8 +33,11 @@ import os
 
 @dataclass(frozen=True)
 class Setup:
-    # Per-dataset epochs; cross_dataset delivers this same delta.
     epochs: float
+    # Only used when FULL_DATA_CROSS optimizes a separate complete-cohort
+    # delta; under halfcross cross_dataset delivers the per-dataset one and
+    # has nothing to budget.
+    cross_epochs: float
     category_epochs: float
     image_epochs: float
     epsilon: float
@@ -221,7 +226,7 @@ def snapshot_epochs_setting() -> tuple[tuple[float, float, float], ...]:
     if not raw or raw.lower() in {"none", "off", "false"}:
         return ()
     triples = tuple(
-        _epoch_triple(entry, "SNAPSHOT_EPOCHS")
+        _epoch_budget(entry, "SNAPSHOT_EPOCHS")
         for entry in raw.split(",") if entry.strip()
     )
     if len(set(triples)) != len(triples):
@@ -277,10 +282,21 @@ def _epoch_number(value: float) -> str:
     return f"{float(value):g}".replace(".", "p")
 
 
-def _epochs_tag(epochs: float, category_epochs: float, image_epochs: float) -> str:
-    """``ep100`` when the scopes agree, ``ep7p14_cat100_img100`` when not."""
+def _epochs_tag(
+    epochs: float,
+    cross_epochs: float,
+    category_epochs: float,
+    image_epochs: float,
+) -> str:
+    """``ep100`` when every scope agrees, ``ep7p14_cat100_img100`` when not.
+
+    ``_cross`` appears only when cross_dataset differs from the per-dataset
+    budget, so every name predating its own budget is unchanged.
+    """
 
     tag = f"ep{_epoch_number(epochs)}"
+    if float(cross_epochs) != float(epochs):
+        tag = f"{tag}_cross{_epoch_number(cross_epochs)}"
     if float(category_epochs) == float(epochs) and float(image_epochs) == float(epochs):
         return tag
     return (
@@ -291,6 +307,7 @@ def _epochs_tag(epochs: float, category_epochs: float, image_epochs: float) -> s
 
 def compose_setup_id(
     epochs: float,
+    cross_epochs: float,
     category_epochs: float,
     image_epochs: float,
     epsilon_label: str,
@@ -312,7 +329,7 @@ def compose_setup_id(
     """
 
     parts = [
-        _epochs_tag(epochs, category_epochs, image_epochs),
+        _epochs_tag(epochs, cross_epochs, category_epochs, image_epochs),
         _epsilon_tag(epsilon_label),
     ]
     # margin_topk is the default loss and adds nothing; ce_focal_dice names
@@ -365,6 +382,7 @@ def effective_setup_id(
 
     return compose_setup_id(
         setup.epochs if epochs is None else epochs,
+        setup.cross_epochs if epochs is None else epochs,
         setup.category_epochs if epochs is None else epochs,
         setup.image_epochs if epochs is None else epochs,
         setup.epsilon_label,
@@ -407,15 +425,24 @@ def _unique_list(name: str, default: str) -> tuple[str, ...]:
     return values
 
 
-def _epoch_triple(entry: str, name: str) -> tuple[float, float, float]:
-    """``"5:100:100"`` or a bare ``"5"`` -> ``(dataset, category, image)``."""
+def _epoch_budget(entry: str, name: str) -> tuple[float, float, float, float]:
+    """``(dataset, cross, category, image)`` from 1, 3 or 4 components.
+
+    A bare ``"5"`` is every scope. Three components are the historical
+    ``dataset:category:image``, with cross_dataset inheriting the dataset
+    budget, which is what it used before it had one of its own. Four are
+    ``dataset:cross:category:image``.
+    """
 
     parts = [part.strip() for part in entry.split(":")]
     if len(parts) == 1:
-        parts = parts * 3
-    if len(parts) != 3 or not all(parts):
+        parts = parts * 4
+    elif len(parts) == 3:
+        parts = [parts[0], parts[0], parts[1], parts[2]]
+    if len(parts) != 4 or not all(parts):
         raise ValueError(
-            f"{name} entry must be N or dataset:category:image, got {entry!r}"
+            f"{name} entry must be N, dataset:category:image, or "
+            f"dataset:cross:category:image, got {entry!r}"
         )
     try:
         values = tuple(float(part) for part in parts)
@@ -426,7 +453,7 @@ def _epoch_triple(entry: str, name: str) -> tuple[float, float, float]:
     return values
 
 
-def epoch_grid() -> tuple[tuple[float, float, float], ...]:
+def epoch_grid() -> tuple[tuple[float, float, float, float], ...]:
     """Per-scope epoch budgets, as ``(dataset, category, image)`` triples.
 
     ``SETUP_EPOCHS=7.14:100:100,5`` sweeps a scope-specific setting and a
@@ -434,7 +461,7 @@ def epoch_grid() -> tuple[tuple[float, float, float], ...]:
     """
 
     grid = [
-        _epoch_triple(entry, "SETUP_EPOCHS")
+        _epoch_budget(entry, "SETUP_EPOCHS")
         for entry in _unique_list("SETUP_EPOCHS", "7.14:100:100")
     ]
     if len(set(grid)) != len(grid):
@@ -469,7 +496,7 @@ PROMPT_MODES = ("frozen_winclip", "learnable_object_agnostic")
 
 
 def build_setups(
-    epochs_grid: tuple[tuple[float, float, float], ...] | None = None,
+    epochs_grid: tuple[tuple[float, float, float, float], ...] | None = None,
     epsilons: tuple[str, ...] | None = None,
     split_protocol: str = "balanced",
     full_data_cross: bool | None = None,
@@ -485,16 +512,17 @@ def build_setups(
     setups: dict[str, Setup] = {}
     for prompt_mode in PROMPT_MODES:
         for loss_formulation in LOSS_FORMULATIONS:
-            for epochs, category_epochs, image_epochs in epochs_grid:
+            for epochs, cross_epochs, category_epochs, image_epochs in epochs_grid:
                 for label in epsilons:
                     setup_id = compose_setup_id(
-                        epochs, category_epochs, image_epochs,
+                        epochs, cross_epochs, category_epochs, image_epochs,
                         label, loss_formulation, prompt_mode,
                         split_protocol=split_protocol,
                         full_data_cross=full_data_cross,
                     )
                     setups[setup_id] = Setup(
                         epochs=epochs,
+                        cross_epochs=cross_epochs,
                         category_epochs=category_epochs,
                         image_epochs=image_epochs,
                         epsilon=parse_epsilon(label),

@@ -158,7 +158,7 @@ class DerivedSetupIdTests(unittest.TestCase):
 
     def test_distinct_configurations_never_share_a_name(self) -> None:
         names = {
-            compose_setup_id(ep, ep, ep, eps, loss, prompt, fraction)
+            compose_setup_id(ep, ep, ep, ep, eps, loss, prompt, fraction)
             for ep in (7.14, 100)
             for eps in ("2/255", "4/255")
             for loss in ("ce_focal_dice", "margin_topk")
@@ -172,13 +172,13 @@ class SetupGridTests(unittest.TestCase):
     """The matrix is generated from parameter lists, not written out by hand."""
 
     def test_default_grid_reproduces_the_historical_budgets(self) -> None:
-        self.assertEqual(epoch_grid(), ((7.14, 100.0, 100.0),))
+        self.assertEqual(epoch_grid(), ((7.14, 7.14, 100.0, 100.0),))
         self.assertEqual(epsilon_grid(), ("2/255", "4/255"))
         self.assertEqual(len(SETUPS), 8)
 
     def test_adding_a_budget_widens_every_family_at_once(self) -> None:
         widened = build_setups(
-            epochs_grid=((7.14, 100, 100), (12, 12, 12)),
+            epochs_grid=((7.14, 7.14, 100, 100), (12, 12, 12, 12)),
             epsilons=("2/255", "4/255"),
         )
         self.assertEqual(len(widened), 16)
@@ -192,7 +192,7 @@ class SetupGridTests(unittest.TestCase):
 
     def test_a_uniform_budget_uses_the_compact_name(self) -> None:
         narrowed = build_setups(
-            epochs_grid=((12, 12, 12),), epsilons=("2/255", "4/255")
+            epochs_grid=((12, 12, 12, 12),), epsilons=("2/255", "4/255")
         )
         self.assertEqual(len(narrowed), 8)
         self.assertTrue(all(setup.epochs == 12 for setup in narrowed.values()))
@@ -201,7 +201,7 @@ class SetupGridTests(unittest.TestCase):
 
     def test_epsilon_grid_widens_the_same_way(self) -> None:
         widened = build_setups(
-            epochs_grid=((12, 12, 12),), epsilons=("2/255", "4/255", "8/255")
+            epochs_grid=((12, 12, 12, 12),), epsilons=("2/255", "4/255", "8/255")
         )
         self.assertEqual(len(widened), 12)
         self.assertIn("ep12_eps8", widened)
@@ -209,9 +209,9 @@ class SetupGridTests(unittest.TestCase):
 
     def test_generated_entries_are_self_naming(self) -> None:
         for grid in (
-            ((3, 3, 3),),
-            ((7.14, 100, 100), (12, 12, 12)),
-            ((1, 40, 20), (12, 300, 150)),
+            ((3, 3, 3, 3),),
+            ((7.14, 7.14, 100, 100), (12, 12, 12, 12)),
+            ((1, 40, 20, 20), (12, 5, 300, 150)),
         ):
             generated = build_setups(epochs_grid=grid, epsilons=("1/255", "16/255"))
             for setup_id, setup in generated.items():
@@ -237,7 +237,8 @@ class ShellLauncherTests(unittest.TestCase):
         rows = _launcher_table()
         expected = [
             [
-                setup_id, str(setup.epochs), str(setup.category_epochs),
+                setup_id, str(setup.epochs), str(setup.cross_epochs),
+                str(setup.category_epochs),
                 str(setup.image_epochs), setup.epsilon_label,
                 setup.loss_formulation, setup.prompt_mode,
                 effective_setup_id(setup, full_data_cross=True),
@@ -250,8 +251,11 @@ class ShellLauncherTests(unittest.TestCase):
         rows = _launcher_table(SETUP_EPOCHS="7.14:100:100")
         for row in rows:
             with self.subTest(requested=row[0]):
-                self.assertEqual((row[1], row[2], row[3]), ("7.14", "100.0", "100.0"))
-                self.assertTrue(row[7].startswith("ep7p14_cat100_img100_"), row[7])
+                self.assertEqual(
+                    (row[1], row[2], row[3], row[4]),
+                    ("7.14", "7.14", "100.0", "100.0"),
+                )
+                self.assertTrue(row[8].startswith("ep7p14_cat100_img100_"), row[8])
         launcher = (Path(__file__).resolve().parents[1] / "train.sh").read_text(
             encoding="utf-8"
         )
@@ -263,16 +267,19 @@ class ShellLauncherTests(unittest.TestCase):
         rows = _launcher_table(SMOKE_TEST="true", SMOKE_EPOCHS="3")
         for row in rows:
             with self.subTest(requested=row[0]):
-                self.assertEqual((row[1], row[2], row[3]), ("3.0", "3.0", "3.0"))
+                self.assertEqual(
+                    (row[1], row[2], row[3], row[4]),
+                    ("3.0", "3.0", "3.0", "3.0"),
+                )
                 # uniform again, so the name returns to its compact form
-                self.assertTrue(row[7].startswith("ep3_"), row[7])
-                self.assertNotIn("_cat", row[7])
+                self.assertTrue(row[8].startswith("ep3_"), row[8])
+                self.assertNotIn("_cat", row[8])
 
     def test_launcher_output_name_follows_the_train_fraction(self) -> None:
         rows = _launcher_table(ATTACK_TRAIN_FRACTION="0.2")
         for row in rows:
-            with self.subTest(effective=row[7]):
-                self.assertIn("_train20", row[7])
+            with self.subTest(effective=row[8]):
+                self.assertIn("_train20", row[8])
 
     def test_launcher_uses_the_effective_name_for_output_and_label(self) -> None:
         launcher = (Path(__file__).resolve().parents[1] / "train.sh").read_text(
@@ -338,15 +345,15 @@ class SplitProtocolTests(unittest.TestCase):
 
     def test_launcher_names_carry_the_protocol(self) -> None:
         rows = _launcher_table(SPLIT_PROTOCOL="full")
-        self.assertTrue(all("_full_fullcross" in row[7] for row in rows))
+        self.assertTrue(all("_full_fullcross" in row[8] for row in rows))
         balanced = _launcher_table(SPLIT_PROTOCOL="balanced")
-        self.assertTrue(all("_full_fullcross" not in row[7] for row in balanced))
-        self.assertTrue(all("_fullcross" in row[7] for row in balanced))
+        self.assertTrue(all("_full_fullcross" not in row[8] for row in balanced))
+        self.assertTrue(all("_fullcross" in row[8] for row in balanced))
 
     def test_launcher_names_carry_the_cross_half_mode(self) -> None:
         rows = _launcher_table(SPLIT_PROTOCOL="full", FULL_DATA_CROSS="false")
-        self.assertTrue(all("_full_halfcross" in row[7] for row in rows))
-        self.assertTrue(all(row[7].endswith("_learnable_prompt") for row in rows[4:]))
+        self.assertTrue(all("_full_halfcross" in row[8] for row in rows))
+        self.assertTrue(all(row[8].endswith("_learnable_prompt") for row in rows[4:]))
 
     def test_full_data_cross_defaults_true_and_validates(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
@@ -360,7 +367,7 @@ class SplitProtocolTests(unittest.TestCase):
 
     def test_build_setups_threads_the_cross_mode_into_ids(self) -> None:
         generated = build_setups(
-            epochs_grid=((12, 12, 12),),
+            epochs_grid=((12, 12, 12, 12),),
             epsilons=("4/255",),
             split_protocol="full",
             full_data_cross=False,
@@ -605,16 +612,22 @@ class SnapshotEpochTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(self._setting(SNAPSHOT_EPOCHS=value), ())
 
-    def test_entries_are_setup_triples_like_the_budget(self) -> None:
+    def test_entries_are_setup_budgets_like_the_run(self) -> None:
         # Same format as SETUP_EPOCHS, so each snapshot names a whole setup.
         self.assertEqual(
             self._setting(SNAPSHOT_EPOCHS="10:200:200,5:100:100"),
-            ((5.0, 100.0, 100.0), (10.0, 200.0, 200.0)),
+            ((5.0, 5.0, 100.0, 100.0), (10.0, 10.0, 200.0, 200.0)),
+        )
+
+    def test_the_cross_budget_can_differ(self) -> None:
+        self.assertEqual(
+            self._setting(SNAPSHOT_EPOCHS="10:3:200:200"),
+            ((10.0, 3.0, 200.0, 200.0),),
         )
 
     def test_a_bare_number_applies_to_every_scope(self) -> None:
         self.assertEqual(
-            self._setting(SNAPSHOT_EPOCHS="5"), ((5.0, 5.0, 5.0),)
+            self._setting(SNAPSHOT_EPOCHS="5"), ((5.0, 5.0, 5.0, 5.0),)
         )
 
     def test_duplicates_are_rejected(self) -> None:
@@ -645,10 +658,10 @@ class SnapshotEpochTests(unittest.TestCase):
         setup = SETUPS[f"{BASE}_eps4"]
         names = [
             compose_setup_id(
-                dataset, category, image, setup.epsilon_label,
+                dataset, cross, category, image, setup.epsilon_label,
                 setup.loss_formulation, setup.prompt_mode,
             )
-            for dataset, category, image in self._setting(
+            for dataset, cross, category, image in self._setting(
                 SNAPSHOT_EPOCHS="5:100:100,10:200:200"
             )
         ]
@@ -659,11 +672,91 @@ class SnapshotEpochTests(unittest.TestCase):
     def test_a_snapshot_must_be_a_prefix_of_the_run(self) -> None:
         from setup_catalog import assert_snapshots_fit
 
-        budget = (20.0, 400.0, 400.0)
-        assert_snapshots_fit(((5.0, 100.0, 100.0), (10.0, 200.0, 200.0)), budget)
+        budget = (20.0, 20.0, 400.0, 400.0)
+        assert_snapshots_fit(
+            ((5.0, 5.0, 100.0, 100.0), (10.0, 3.0, 200.0, 200.0)), budget
+        )
         # A scope can be stopped early, never extended.
         with self.assertRaisesRegex(ValueError, "exceeds the run budget"):
-            assert_snapshots_fit(((5.0, 500.0, 100.0),), budget)
+            assert_snapshots_fit(((5.0, 5.0, 500.0, 100.0),), budget)
         # And a snapshot equal to the run would claim the run's own name.
         with self.assertRaisesRegex(ValueError, "the run's own budget"):
             assert_snapshots_fit((budget,), budget)
+
+
+class CrossDatasetBudgetTests(unittest.TestCase):
+    """cross_dataset has its own budget, because it trains on its own cohort.
+
+    Under fullcross it optimizes a delta on the complete source rather than
+    the attack_train half, so the same epoch number buys about twice the
+    steps. Before this it borrowed the per-dataset budget and there was no way
+    to run it shorter without shortening per_dataset too.
+    """
+
+    def _grid(self, value: str):
+        with mock.patch.dict(os.environ, {"SETUP_EPOCHS": value}):
+            from setup_catalog import epoch_grid
+
+            return epoch_grid()
+
+    def test_the_historical_form_keeps_cross_on_the_dataset_budget(self) -> None:
+        self.assertEqual(self._grid("7.14:100:100"), ((7.14, 7.14, 100.0, 100.0),))
+
+    def test_a_bare_number_still_means_every_scope(self) -> None:
+        self.assertEqual(self._grid("100"), ((100.0, 100.0, 100.0, 100.0),))
+
+    def test_the_four_part_form_separates_cross(self) -> None:
+        self.assertEqual(self._grid("7.14:5:100:100"), ((7.14, 5.0, 100.0, 100.0),))
+
+    def test_two_part_entries_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "dataset:cross:category:image"):
+            self._grid("7:100")
+
+    def test_the_name_is_unchanged_while_cross_matches_the_dataset(self) -> None:
+        # Every existing output name predates the cross budget and must survive.
+        setup = SETUPS[f"{BASE}_eps4"]
+        self.assertEqual(setup.cross_epochs, setup.epochs)
+        self.assertEqual(effective_setup_id(setup), f"{BASE}_eps4")
+        self.assertNotIn("cross", effective_setup_id(setup))
+
+    def test_a_different_cross_budget_names_itself(self) -> None:
+        generated = build_setups(
+            epochs_grid=((7.14, 5, 100, 100),), epsilons=("4/255",)
+        )
+        self.assertIn("ep7p14_cross5_cat100_img100_eps4", generated)
+        for setup_id, setup in generated.items():
+            with self.subTest(setup_id=setup_id):
+                self.assertEqual(effective_setup_id(setup), setup_id)
+
+    def test_budgets_that_differ_only_in_cross_never_collide(self) -> None:
+        names = {
+            effective_setup_id(setup)
+            for cross in (7.14, 5, 3)
+            for setup in build_setups(
+                epochs_grid=((7.14, cross, 100, 100),), epsilons=("4/255",)
+            ).values()
+        }
+        # 3 cross budgets x 2 losses x 2 prompt families, all distinct.
+        self.assertEqual(len(names), 3 * 2 * 2)
+
+    def test_the_launcher_exports_the_cross_budget(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "train.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('export PER_CROSS_EPOCHS="$cross_epochs"', script)
+
+    def test_the_audit_keys_cross_dataset_to_its_own_budget(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1] / "audit_generation.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '"cross_dataset": SMOKE_EPOCHS if SMOKE else setup.cross_epochs,', source
+        )
+
+    def test_the_runner_uses_it_only_for_the_complete_source_delta(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1] / "run_per_dataset.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "PER_CROSS_EPOCHS if use_full_source else PER_DATASET_EPOCHS", source
+        )

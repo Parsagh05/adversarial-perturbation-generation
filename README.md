@@ -450,7 +450,7 @@ entries:
 
 | List | Default | Override |
 |---|---|---|
-| epoch budgets | `7.14:100:100` | `SETUP_EPOCHS="5:60:50"` |
+| epoch budgets | `7.14:100:100` | `SETUP_EPOCHS="7.14:5:100:100"` |
 | Linf budgets | `2/255, 4/255` | `SETUP_EPSILONS="2/255,4/255,8/255"` |
 | loss formulations | `margin_topk` (default), `ce_focal_dice` | fixed |
 | prompt families | `frozen_winclip, learnable_object_agnostic` | fixed |
@@ -470,11 +470,29 @@ steps = ceil(epochs * ceil(n_images / batch_size))
 ```
 
 The scopes fit a very different number of images per delta, so a shared budget
-is meaningless in steps but meaningful in epochs. A `SETUP_EPOCHS` entry is
-still a `dataset:category:image` triple because the right number of passes
+is meaningless in steps but meaningful in epochs. A `SETUP_EPOCHS` entry is a
+`dataset:cross:category:image` budget because the right number of passes
 differs per scope: the per-dataset delta generalises across 224 images and
 saturates early, whereas a per-image delta fits the one image it attacks and
 simply needs enough steps to converge.
+
+The `cross` value matters only under `fullcross`, which optimises a separate
+delta on the complete source rather than on the attack-train half. That cohort
+is about twice the size, so the same epoch number buys about twice the steps
+and twice the compute:
+
+| delta | cohort | images | steps at 7.14 epochs |
+|---|---|---:|---:|
+| same_dataset | attack-train half | 704 | 2514 |
+| cross_dataset | complete source | 1408 | 5027 |
+
+That is what an epoch means, and it may be what you want, but without a
+separate value there is no way to run cross-dataset shorter without also
+shortening per-dataset. The component appears in the name only when it differs
+from the dataset budget, so every existing output name is unchanged, and
+`7.14:5:100:100` gives `ep7p14_cross5_cat100_img100`. Under `halfcross`
+cross-dataset delivers the per-dataset delta and the value is unused. The
+older three-part form still works, with cross inheriting the dataset budget.
 
 The default `7.14:100:100` reproduces the historical 800 / 200 / 100 step
 counts exactly at the default batch sizes, and names itself

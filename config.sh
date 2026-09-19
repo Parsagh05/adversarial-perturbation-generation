@@ -9,18 +9,21 @@ OUTPUT_BASE="${OUTPUT_BASE:-/ABSOLUTE/PATH/TO/canonical_clip_outputs}"
 # loss formulations and the two prompt families. Setup IDs are derived from
 # these values, so new entries name themselves.
 #
-# Each SETUP_EPOCHS entry is one dataset:category:image triple, because the
-# scopes solve different problems: a per-dataset delta must satisfy hundreds
-# of images at once, a per-category delta about a dozen, a per-image delta
-# exactly one. cross_dataset takes no value: halfcross delivers the per-dataset
-# delta and fullcross uses its epoch budget for a complete-cohort delta. A bare
-# number means all three scopes use it.
+# Each SETUP_EPOCHS entry is one dataset:cross:category:image budget, because
+# the scopes solve different problems: a per-dataset delta must satisfy
+# hundreds of images at once, a per-category delta about a dozen, a per-image
+# delta exactly one. The cross value is used only by fullcross, which
+# optimizes a separate delta on the complete source; halfcross delivers the
+# per-dataset delta and has nothing to budget. A bare number means every scope
+# uses it, and the older dataset:category:image form still works with cross
+# inheriting the dataset budget, which is what it used before it had one.
 # An epoch is one pass over whatever that delta trains on; the runner derives
 # the PGD step count as ceil(epochs * ceil(n_images / batch)). Budgets therefore
 # stay constant when the training set changes size, as it does between
 # SPLIT_PROTOCOL=balanced and full. A per-image delta trains on one image, so
 # there an epoch is one PGD step.
 #   SETUP_EPOCHS="7.14:100:100"       reproduces the historical 800/200/100
+#   SETUP_EPOCHS="7.14:5:100:100"     the same, but cross_dataset at 5 epochs
 #   SETUP_EPOCHS="7.14:100:100,5:60:50"  sweep two of them
 #   SETUP_EPOCHS="100"                same budget for every scope
 SETUP_EPOCHS="${SETUP_EPOCHS:-7.14:100:100}"
