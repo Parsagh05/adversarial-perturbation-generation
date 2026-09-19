@@ -182,7 +182,7 @@ for setup_id, setup in SETUPS.items():
         full_data_cross, schedule, hinge, momentum, selection,
     )
     for index, (row_budget, row_name) in enumerate(rows):
-        print("\t".join((
+        print("\x1f".join((
             setup_id, *(str(value) for value in row_budget),
             setup.epsilon_label, setup.loss_formulation, setup.prompt_mode,
             row_name, spec if index == 0 else "", settings,
@@ -194,7 +194,7 @@ for setup_id, setup in SETUPS.items():
 PYEOF
 )"
 [[ -n "$SETUP_TABLE" ]] || { echo "Could not read the setup catalog" >&2; exit 2; }
-mapfile -t SETUP_IDS < <(cut -f1 <<< "$SETUP_TABLE")
+mapfile -t SETUP_IDS < <(cut -d$'\x1f' -f1 <<< "$SETUP_TABLE")
 
 case "${RUN_PER_DATASET,,},${RUN_CROSS_DATASET,,},${RUN_PER_CATEGORY,,},${RUN_PER_IMAGE,,}" in
   false,false,false,false)
@@ -238,7 +238,7 @@ selected() {
 }
 
 selected_count=0
-while IFS=$'\t' read -r id _ _ _ _ _ _ prompt_mode _ _ _ _ _ _ _; do
+while IFS=$'\x1f' read -r id _ _ _ _ _ _ prompt_mode _ _ _ _ _ _ _; do
   if selected "$id" "$prompt_mode"; then
     selected_count=$((selected_count + 1))
   fi
@@ -248,7 +248,7 @@ done <<< "$SETUP_TABLE"
   exit 2
 }
 
-while IFS=$'\t' read -r id epochs cross_epochs category_epochs image_epochs epsilon loss_formulation prompt_mode effective_id snapshot_spec settings_tag bundle_per_dataset bundle_cross_dataset bundle_per_category bundle_per_image; do
+while IFS=$'\x1f' read -r id epochs cross_epochs category_epochs image_epochs epsilon loss_formulation prompt_mode effective_id snapshot_spec settings_tag bundle_per_dataset bundle_cross_dataset bundle_per_category bundle_per_image; do
   selected "$id" "$prompt_mode" || continue
   if [[ "$prompt_mode" == "frozen_winclip" ]]; then
     prompt_folder="frozen_prompt"

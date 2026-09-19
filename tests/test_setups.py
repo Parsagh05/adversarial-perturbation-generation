@@ -4,6 +4,7 @@ import ast
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -27,6 +28,19 @@ from setup_catalog import (
 BASE = "ep7p14_cat100_img100"
 
 
+NL_CONST = chr(10)
+BS_CONST = chr(92)
+
+def _launcher_snippet() -> str:
+    """The catalog snippet train.sh embeds."""
+
+    script = (Path(__file__).resolve().parents[1] / 'train.sh').read_text(
+        encoding='utf-8'
+    )
+    found = re.search(r"<<'PYEOF'" + chr(10) + '(.*?)' + chr(10) + "PYEOF", script, re.DOTALL)
+    assert found is not None, 'train.sh no longer embeds a catalog snippet'
+    return found.group(1)
+
 def _launcher_table(**overrides: str) -> list[list[str]]:
     """Run the snippet train.sh embeds, under the given environment."""
 
@@ -45,10 +59,11 @@ def _launcher_table(**overrides: str) -> list[list[str]]:
         [sys.executable, "-c", snippet.group(1)],
         capture_output=True, text=True, cwd=root, check=True, env=environment,
     )
-    # Strip newlines only: a row's last field is empty when the setup emits
-    # no snapshots, and a bare strip() would eat it off the final row.
+    # Split on the unit separator, exactly as train.sh does. Tab would be
+    # wrong twice over: bash collapses runs of it, and a bare strip()
+    # would eat a trailing empty snapshot field off the final row.
     return [
-        line.split("\t")
+        line.split(chr(31))
         for line in completed.stdout.strip("\n").splitlines()
     ]
 
@@ -1146,3 +1161,85 @@ class SetupIdReachesTheManifestTests(unittest.TestCase):
         source = self._source("audit_generation.py")
         self.assertIn('if "setup_id" not in manifest.columns:', source)
         self.assertIn("expected_setup_id", source)
+
+
+class LauncherFieldBindingTests(unittest.TestCase):
+    """Replay train.sh's own read loop, in bash, against the real table.
+
+    Splitting the table in Python cannot see this class of bug: Python's
+    split keeps empty fields, while bash's read with a whitespace IFS
+    collapses a run of delimiters and silently drops one. The table must
+    therefore be parsed the way the launcher parses it.
+    """
+
+    def _rows(self, **overrides):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is not available")
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "train.sh").read_text(encoding="utf-8")
+        # Take the launcher's actual loop header so this tracks train.sh
+        # instead of a copy that can drift away from it.
+        header = re.search(
+            r"^while IFS=.*read -r id epochs .*do$", script, re.MULTILINE
+        )
+        self.assertIsNotNone(header, "train.sh no longer has the setup loop")
+        table = subprocess.run(
+            [sys.executable, "-c", _launcher_snippet()],
+            capture_output=True, text=True, cwd=root, check=True,
+            env={
+                **os.environ, "SMOKE_TEST": "false", "SMOKE_EPOCHS": "0.02",
+                "ATTACK_TRAIN_FRACTION": "1.0", **overrides,
+            },
+        ).stdout
+        program = NL_CONST.join((
+            header.group(0),
+            '  echo "$settings_tag|$bundle_per_image|$snapshot_spec|$id"',
+            'done <<< "$SETUP_TABLE"',
+        ))
+        completed = subprocess.run(
+            [bash, "-c", program], capture_output=True, text=True, check=True,
+            # $(...) strips trailing newlines in train.sh, so the launcher
+            # never reads a blank final line; match that here.
+            env={**os.environ, "SETUP_TABLE": table.strip(NL_CONST)},
+        )
+        return [
+            line.split("|")
+            for line in completed.stdout.strip(NL_CONST).splitlines()
+        ]
+
+    def test_every_column_binds_when_snapshot_spec_is_empty(self) -> None:
+        """Without SNAPSHOT_EPOCHS every row's spec is empty."""
+
+        rows = self._rows(SETUP_EPOCHS="10", SETUP_EPSILONS="4/255")
+        self.assertTrue(rows)
+        for settings, bundle_per_image, spec, setup_id in rows:
+            with self.subTest(setup=setup_id):
+                # A collapsed field shifts a path into settings_tag and
+                # empties the last column.
+                self.assertNotIn("/", settings)
+                self.assertTrue(bundle_per_image)
+                self.assertIn("/", bundle_per_image)
+                self.assertEqual(spec, "")
+
+    def test_every_column_binds_on_the_non_first_snapshot_rows(self) -> None:
+        """With SNAPSHOT_EPOCHS only the first row carries a spec."""
+
+        rows = self._rows(
+            SETUP_EPOCHS="20:200:40", SETUP_EPSILONS="4/255",
+            SNAPSHOT_EPOCHS="5:50:10,10:100:20",
+        )
+        self.assertTrue(rows)
+        for settings, bundle_per_image, _, setup_id in rows:
+            with self.subTest(setup=setup_id):
+                self.assertNotIn("/", settings)
+                self.assertTrue(bundle_per_image)
+
+    def test_the_table_is_not_separated_by_whitespace(self) -> None:
+        """The delimiter itself is the fix; pin it."""
+
+        script = (
+            Path(__file__).resolve().parents[1] / "train.sh"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("IFS=$'" + BS_CONST + "t'", script)
+        self.assertIn("IFS=$'" + BS_CONST + "x1f'", script)
