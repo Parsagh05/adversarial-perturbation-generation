@@ -139,12 +139,15 @@ MOMENTUM_DECAY="${MOMENTUM_DECAY:-}"
 # the kept point differs, and best names the setup (_best).
 CHECKPOINT_SELECTION="${CHECKPOINT_SELECTION:-final}"
 
-# Epoch boundaries at which one optimization run also captures the delta it
-# would have returned had it stopped there, so a budget sweep costs one run
-# rather than one run per point. Empty disables it. Requires
-# STEP_SIZE_SCHEDULE=constant, since a decaying step depends on the total
-# budget and the snapshot would not equal a standalone run.
-#   SNAPSHOT_EPOCHS="5,6,7"   inside a run whose SETUP_EPOCHS budget is larger
+# Shorter budgets to capture inside one run, written exactly like
+# SETUP_EPOCHS so each snapshot names a complete setup of its own and every
+# scope stops at its own boundary. Empty disables it. Each entry must be a
+# prefix of the run's budget: no scope may exceed it, and the triple may not
+# equal it. Requires STEP_SIZE_SCHEDULE=constant, since a decaying step
+# depends on the total budget and the snapshot would not equal a standalone
+# run of that budget.
+#   SETUP_EPOCHS="20:400:400" SNAPSHOT_EPOCHS="5:100:100,10:200:200"
+#   -> ep5_cat100_img100_..., ep10_cat200_img200_..., plus the run's own
 SNAPSHOT_EPOCHS="${SNAPSHOT_EPOCHS:-}"
 MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL="${MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL:-0.20}"
 MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL="${MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL:-0.40}"

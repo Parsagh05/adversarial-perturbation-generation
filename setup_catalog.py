@@ -204,11 +204,15 @@ def checkpoint_selection_setting() -> str:
     return selection
 
 
-def snapshot_epochs_setting() -> tuple[float, ...]:
-    """Epoch boundaries at which to capture an equivalent shorter-budget delta.
+def snapshot_epochs_setting() -> tuple[tuple[float, float, float], ...]:
+    """Shorter budgets to capture inside one run, as the same kind of triple.
 
-    Empty by default. Equivalence to a standalone run of that budget holds only
-    while the step size is independent of the total budget, so a decaying
+    ``SNAPSHOT_EPOCHS="5:100:100,10:200:200"`` reads exactly like
+    ``SETUP_EPOCHS``, so every snapshot names a complete setup of its own and
+    each scope snapshots at its own boundary. Empty by default.
+
+    Equivalence to a standalone run of that budget holds only while the step
+    size is independent of the total budget, so a decaying
     STEP_SIZE_SCHEDULE is refused rather than silently producing deltas that
     are valid perturbations but not the runs they claim to stand in for.
     """
@@ -216,22 +220,47 @@ def snapshot_epochs_setting() -> tuple[float, ...]:
     raw = os.environ.get("SNAPSHOT_EPOCHS", "").strip()
     if not raw or raw.lower() in {"none", "off", "false"}:
         return ()
-    values = tuple(sorted({float(part) for part in raw.split(",") if part.strip()}))
-    if any(value <= 0 for value in values):
-        raise ValueError(f"SNAPSHOT_EPOCHS must be positive, got {raw!r}")
+    triples = tuple(
+        _epoch_triple(entry, "SNAPSHOT_EPOCHS")
+        for entry in raw.split(",") if entry.strip()
+    )
+    if len(set(triples)) != len(triples):
+        raise ValueError(f"SNAPSHOT_EPOCHS contains duplicate settings: {triples}")
     if step_size_schedule_setting() != "constant":
         raise ValueError(
             "SNAPSHOT_EPOCHS requires STEP_SIZE_SCHEDULE=constant: a decaying "
             "step size depends on the total budget, so a snapshot would not "
             "equal a standalone run of that budget"
         )
-    return values
+    return tuple(sorted(triples))
+
+
+def assert_snapshots_fit(
+    snapshot_triples: tuple[tuple[float, float, float], ...],
+    budget: tuple[float, float, float],
+) -> None:
+    """Every snapshot must be a prefix of the run it is taken from.
+
+    A scope can only be stopped early, never extended, and a snapshot equal to
+    the run in all three scopes would claim the run's own setup ID.
+    """
+
+    for triple in snapshot_triples:
+        if any(value > limit for value, limit in zip(triple, budget)):
+            raise ValueError(
+                f"SNAPSHOT_EPOCHS entry {triple} exceeds the run budget {budget} "
+                "in at least one scope"
+            )
+        if triple == tuple(budget):
+            raise ValueError(
+                f"SNAPSHOT_EPOCHS entry {triple} is the run's own budget"
+            )
 
 
 def snapshot_steps(
-    snapshot_epochs: tuple[float, ...], n_images: int, batch_size: int
+    snapshot_epochs, n_images: int, batch_size: int
 ) -> tuple[int, ...]:
-    """Absolute step indices for the listed epoch boundaries.
+    """Absolute step indices for one scope's listed boundaries.
 
     Uses the same derivation as the run's own budget, so an integer epoch
     lands on the same step index in a short run and a long one.
@@ -378,6 +407,25 @@ def _unique_list(name: str, default: str) -> tuple[str, ...]:
     return values
 
 
+def _epoch_triple(entry: str, name: str) -> tuple[float, float, float]:
+    """``"5:100:100"`` or a bare ``"5"`` -> ``(dataset, category, image)``."""
+
+    parts = [part.strip() for part in entry.split(":")]
+    if len(parts) == 1:
+        parts = parts * 3
+    if len(parts) != 3 or not all(parts):
+        raise ValueError(
+            f"{name} entry must be N or dataset:category:image, got {entry!r}"
+        )
+    try:
+        values = tuple(float(part) for part in parts)
+    except ValueError as error:
+        raise ValueError(f"{name} entry is not numeric: {entry!r}") from error
+    if any(value <= 0 for value in values):
+        raise ValueError(f"{name} must be positive: {entry!r}")
+    return values
+
+
 def epoch_grid() -> tuple[tuple[float, float, float], ...]:
     """Per-scope epoch budgets, as ``(dataset, category, image)`` triples.
 
@@ -385,22 +433,10 @@ def epoch_grid() -> tuple[tuple[float, float, float], ...]:
     uniform one. A bare number expands to the same budget for every scope.
     """
 
-    grid = []
-    for entry in _unique_list("SETUP_EPOCHS", "7.14:100:100"):
-        parts = [part.strip() for part in entry.split(":")]
-        if len(parts) == 1:
-            parts = parts * 3
-        if len(parts) != 3 or not all(parts):
-            raise ValueError(
-                f"SETUP_EPOCHS entry must be N or dataset:category:image, got {entry!r}"
-            )
-        try:
-            values = tuple(float(part) for part in parts)
-        except ValueError as error:
-            raise ValueError(f"SETUP_EPOCHS entry is not numeric: {entry!r}") from error
-        if any(value <= 0 for value in values):
-            raise ValueError(f"SETUP_EPOCHS must be positive: {entry!r}")
-        grid.append(values)
+    grid = [
+        _epoch_triple(entry, "SETUP_EPOCHS")
+        for entry in _unique_list("SETUP_EPOCHS", "7.14:100:100")
+    ]
     if len(set(grid)) != len(grid):
         raise ValueError(f"SETUP_EPOCHS contains duplicate settings: {tuple(grid)}")
     return tuple(grid)

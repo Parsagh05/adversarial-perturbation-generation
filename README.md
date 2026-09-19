@@ -685,9 +685,19 @@ CHECKPOINT_SELECTION=best RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
 
 ### Epoch snapshots: several budgets from one run
 
-`SNAPSHOT_EPOCHS` lists epoch boundaries at which the optimization also
-captures the delta it would have returned had it been configured to stop
-there. It is empty by default.
+`SNAPSHOT_EPOCHS` lists shorter budgets to capture inside one run. It is
+written exactly like `SETUP_EPOCHS`, as `dataset:category:image` triples, so
+every snapshot names a complete setup of its own and each scope stops at its
+own boundary. It is empty by default.
+
+```bash
+SETUP_EPOCHS="20:400:400" SNAPSHOT_EPOCHS="5:100:100,10:200:200"
+```
+
+That run produces three setups: `ep5_cat100_img100_...`,
+`ep10_cat200_img200_...` and its own `ep20_cat400_img400_...`. Each entry has
+to be a prefix of the run's budget, so no scope may exceed it and the triple
+may not equal it, which would claim the run's own name.
 
 A sweep over five, six, seven and eight epochs costs 26 epochs of optimization
 as four runs. As snapshots inside one eight-epoch run it costs eight, and the
@@ -731,31 +741,39 @@ exactly, and it runs for both selection modes. A companion test asserts the
 opposite under a decaying schedule, so the precondition cannot quietly stop
 being a precondition.
 
-**Status.** The optimizer captures snapshots and the budgets derive their own
-setup IDs, so a snapshot at five epochs is named `ep5_...` exactly as a
-standalone run would be. Turning those captured deltas into complete,
-independently evaluable bundles is not wired up yet; see
-[the open decisions](#snapshot-bundles-not-yet-wired).
+**Status.** The per-dataset optimizer captures snapshots, the configuration
+parses and validates, and each budget derives its own setup ID. Writing those
+captured deltas out as complete setup directories is not wired up yet, and
+`per_category` and `per_image` do not capture snapshots yet either; see
+[what remains](#snapshot-bundles-what-remains).
 
-### Snapshot bundles: not yet wired
+### Snapshot bundles: what remains
 
-Emitting a snapshot as a complete bundle means one optimization pass writing
-into several setup directories, which the launcher currently forbids: it fixes
-one output directory per setup before the runner starts. Three decisions have
-to be made before that wiring is useful, and none of them is a detail.
+A snapshot directory is meant to be indistinguishable from a standalone run of
+that budget, holding all four scopes. Two pieces are still missing.
 
-- **Which scopes a snapshot budget emits.** The per-dataset and cross-dataset
-  bundles share one optimization pass, so both come for free. `per_category`
-  and `per_image` do not, and re-running them per budget would undo the saving.
-  A snapshot setup directory holding only two of the four scopes is
-  incomplete, and `audit_generation.py` would have to be told so.
-- **Resumability on collision.** With `OVERWRITE_EXISTING=false` a snapshot
-  whose setup ID already exists from a standalone run should probably fail
-  loudly on a SHA-256 mismatch rather than skip or overwrite, because a
-  mismatch means one of the four conditions above has broken.
-- **Diagnostic cost.** Snapshots do not change generation cost but multiply
-  evaluation runs: a run with four snapshots still needs four full evaluation
-  passes downstream.
+- **The other two scopes.** `per_category` and `per_image` each optimize a
+  delta of their own, so each needs the same capture the per-dataset scope
+  now has. Both satisfy the equivalence conditions already: the per-category
+  loop seeds its sampler per condition, and the per-image path draws no
+  batches at all.
+- **Writing the bundles.** One optimization pass has to produce several setup
+  directories, which the launcher currently forbids by fixing one output
+  directory per setup before a runner starts. The intended route reuses the
+  existing bundling code untouched: each runner writes its snapshot deltas
+  into the snapshot setup's own artifact path with that budget's metadata,
+  and the launcher then replays the ordinary per-setup block for each
+  snapshot budget, where the reuse guard finds the deltas already on disk and
+  skips optimization. That guard compares configuration rather than results,
+  so only `optimization_epochs` and the derived step count have to differ.
+
+One open decision: with `OVERWRITE_EXISTING=false`, a snapshot whose setup ID
+already exists from a standalone run should fail loudly on a SHA-256 mismatch
+rather than skip or overwrite, because a mismatch means one of the four
+conditions above has broken.
+
+Snapshots do not change generation cost but multiply evaluation runs: a run
+with two snapshots still needs two extra full evaluation passes downstream.
 
 `ATTACK_TRAIN_FRACTION` is folded in the same way: any value below 1.00 adds a
 `_trainNN` component, so a 20% run lands in `..._train20` and cannot overwrite

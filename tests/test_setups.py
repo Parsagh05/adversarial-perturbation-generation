@@ -605,8 +605,21 @@ class SnapshotEpochTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(self._setting(SNAPSHOT_EPOCHS=value), ())
 
-    def test_values_are_sorted_and_deduplicated(self) -> None:
-        self.assertEqual(self._setting(SNAPSHOT_EPOCHS="7,5,6,5"), (5.0, 6.0, 7.0))
+    def test_entries_are_setup_triples_like_the_budget(self) -> None:
+        # Same format as SETUP_EPOCHS, so each snapshot names a whole setup.
+        self.assertEqual(
+            self._setting(SNAPSHOT_EPOCHS="10:200:200,5:100:100"),
+            ((5.0, 100.0, 100.0), (10.0, 200.0, 200.0)),
+        )
+
+    def test_a_bare_number_applies_to_every_scope(self) -> None:
+        self.assertEqual(
+            self._setting(SNAPSHOT_EPOCHS="5"), ((5.0, 5.0, 5.0),)
+        )
+
+    def test_duplicates_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            self._setting(SNAPSHOT_EPOCHS="5:100:100,5:100:100")
 
     def test_non_positive_budgets_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -626,9 +639,31 @@ class SnapshotEpochTests(unittest.TestCase):
             (derive_steps(5.0, 224, 2), derive_steps(6.0, 224, 2)),
         )
 
-    def test_each_budget_derives_its_own_setup_id(self) -> None:
-        names = {
-            effective_setup_id(SETUPS[f"{BASE}_eps4"], epochs)
-            for epochs in (5.0, 6.0, 7.0)
-        }
-        self.assertEqual(names, {"ep5_eps4", "ep6_eps4", "ep7_eps4"})
+    def test_each_snapshot_names_a_complete_setup(self) -> None:
+        from setup_catalog import compose_setup_id
+
+        setup = SETUPS[f"{BASE}_eps4"]
+        names = [
+            compose_setup_id(
+                dataset, category, image, setup.epsilon_label,
+                setup.loss_formulation, setup.prompt_mode,
+            )
+            for dataset, category, image in self._setting(
+                SNAPSHOT_EPOCHS="5:100:100,10:200:200"
+            )
+        ]
+        self.assertEqual(
+            names, ["ep5_cat100_img100_eps4", "ep10_cat200_img200_eps4"]
+        )
+
+    def test_a_snapshot_must_be_a_prefix_of_the_run(self) -> None:
+        from setup_catalog import assert_snapshots_fit
+
+        budget = (20.0, 400.0, 400.0)
+        assert_snapshots_fit(((5.0, 100.0, 100.0), (10.0, 200.0, 200.0)), budget)
+        # A scope can be stopped early, never extended.
+        with self.assertRaisesRegex(ValueError, "exceeds the run budget"):
+            assert_snapshots_fit(((5.0, 500.0, 100.0),), budget)
+        # And a snapshot equal to the run would claim the run's own name.
+        with self.assertRaisesRegex(ValueError, "the run's own budget"):
+            assert_snapshots_fit((budget,), budget)
