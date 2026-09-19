@@ -263,6 +263,7 @@ def audit_scope(
     expected_epsilon: float,
     expected_loss_formulation: str,
     expected_prompt_mode: str,
+    expected_setup_id: str,
 ) -> set[str]:
     manifest_path = bundle / "attack_manifest.csv"
     diagnostics_path = bundle / "optimization_diagnostics.csv"
@@ -283,6 +284,18 @@ def audit_scope(
     # The step count is derived from the epoch budget and each condition's own
     # training-set size, so one manifest legitimately holds several values; the
     # budget is what must match.
+    # The tree no longer spells the setup ID, so the manifest is the only
+    # place the evaluator can read it from. A missing column here becomes
+    # "No attack conditions matched the configuration" downstream, after the
+    # whole generation cost has been paid.
+    if "setup_id" not in manifest.columns:
+        raise RuntimeError(f"Missing setup_id column in {manifest_path}")
+    recorded_ids = set(manifest.setup_id.astype(str))
+    if recorded_ids != {expected_setup_id}:
+        raise RuntimeError(
+            f"Wrong setup_id in {manifest_path}: expected {expected_setup_id}, "
+            f"found {sorted(recorded_ids)}"
+        )
     if "optimization_epochs" not in manifest.columns:
         raise RuntimeError(f"Missing optimization_epochs in {manifest_path}")
     recorded = {round(float(value), 6) for value in manifest.optimization_epochs}
@@ -487,6 +500,7 @@ def main() -> None:
                         setup.epsilon,
                         setup.loss_formulation,
                         setup.prompt_mode,
+                        effective_id,
                     )
                 )
     if len(protocol_hashes) != 1:

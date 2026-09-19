@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 import re
@@ -1082,3 +1083,66 @@ class LauncherAuditAgreementTests(unittest.TestCase):
                 source = (root / name).read_text(encoding="utf-8")
                 self.assertIn(f'os.environ["{variable}"]', source)
                 self.assertNotIn('OUTPUT_BASE / "canonical_clip', source)
+
+
+class SetupIdReachesTheManifestTests(unittest.TestCase):
+    """The setup ID must survive into the manifest.
+
+    It used to reach the evaluator through the directory name and the archive
+    filename. The settings/scope/budget tree spells neither, so the manifest is
+    now the only carrier, and losing it is silent: generation completes and
+    every evaluation stage then fails to match any condition.
+    """
+
+    RUNNERS = ("run_per_dataset.py", "run_per_category.py", "run_per_image.py")
+
+    def _source(self, name):
+        return (Path(__file__).resolve().parents[1] / name).read_text(
+            encoding="utf-8"
+        )
+
+    def test_each_runner_writes_the_exported_id(self) -> None:
+        for name in self.RUNNERS:
+            with self.subTest(runner=name):
+                source = self._source(name)
+                self.assertIn('SETUP_ID = os.environ["SETUP_ID"]', source)
+                self.assertIn('"setup_id": SETUP_ID,', source)
+
+    def test_the_exported_id_is_not_a_dead_read(self) -> None:
+        """A read with no use is how this broke the first time."""
+
+        for name in self.RUNNERS:
+            with self.subTest(runner=name):
+                tree = ast.parse(self._source(name))
+                uses = [
+                    node for node in ast.walk(tree)
+                    if isinstance(node, ast.Name)
+                    and node.id == "SETUP_ID"
+                    and isinstance(node.ctx, ast.Load)
+                ]
+                self.assertTrue(
+                    uses, f"{name} reads SETUP_ID but never uses it"
+                )
+
+    def test_the_manifest_row_carries_it_beside_the_scope(self) -> None:
+        """Pin it to the row dict, not merely to the file."""
+
+        for name, scope_key in (
+            ("run_per_dataset.py", '"scope": BUNDLE_SCOPES[setting],'),
+            ("run_per_category.py", '"scope": "per_category",'),
+            ("run_per_image.py", '"scope": "per_image",'),
+        ):
+            with self.subTest(runner=name):
+                source = self._source(name)
+                marker = '"setup_id": SETUP_ID,'
+                self.assertIn(marker, source, f"{name}: setup_id is not written")
+                index = source.index(marker)
+                self.assertIn(
+                    scope_key, source[index:index + 200],
+                    f"{name}: setup_id is not in the manifest row dict",
+                )
+
+    def test_the_audit_rejects_a_manifest_without_it(self) -> None:
+        source = self._source("audit_generation.py")
+        self.assertIn('if "setup_id" not in manifest.columns:', source)
+        self.assertIn("expected_setup_id", source)

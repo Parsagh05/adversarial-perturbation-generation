@@ -765,6 +765,7 @@ for row in artifact_rows:
             "source_target_id_overlap_count": len(overlap),
         } if setting == "cross_dataset" else {})
         delivery_rows[setting].append({
+            "setup_id": SETUP_ID,
             "scope": BUNDLE_SCOPES[setting],
             "source_dataset": row["source_dataset"],
             "target_dataset": target_dataset,

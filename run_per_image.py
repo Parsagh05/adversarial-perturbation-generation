@@ -656,6 +656,7 @@ for row in artifact_rows:
     relative_noise = artifact.relative_to(OUTPUT_ROOT)
     noise_paths.append(artifact)
     manifest_rows.append({
+        "setup_id": SETUP_ID,
         "scope": "per_image",
         "source_dataset": row["source_dataset"],
         "target_dataset": row["target_dataset"],
