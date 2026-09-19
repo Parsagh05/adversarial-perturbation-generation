@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -25,6 +25,8 @@ class UniversalAttackResult:
     diagnostic_sample_ids: List[str]
     selected_step: int
     selected_diagnostic_loss: float
+    # step -> the delta this run would have returned had it stopped there.
+    snapshots: Dict[int, torch.Tensor] = field(default_factory=dict)
 
 
 def direction_labels(direction: str) -> Tuple[int, int]:
@@ -597,8 +599,22 @@ class TargetedPGD:
         mask_loader: Optional[Callable[[object], torch.Tensor]] = None,
         diagnostic_samples: Optional[Sequence[object]] = None,
         progress: Callable[[int, int, Dict[str, float]], None] | None = None,
+        snapshot_steps: Sequence[int] = (),
     ) -> UniversalAttackResult:
-        """Optimize one shared perturbation across the supplied samples."""
+        """Optimize one shared perturbation across the supplied samples.
+
+        ``snapshot_steps`` captures, at each listed step, the delta this run
+        would have returned had it been configured to stop there. That is only
+        equivalent to a standalone shorter run while the step size is
+        independent of the total budget, which ``constant`` guarantees and the
+        decaying schedules do not.
+        """
+
+        wanted_snapshots = {
+            int(step) for step in snapshot_steps
+            if 0 < int(step) < self.config.universal_steps
+        }
+        snapshots: Dict[int, torch.Tensor] = {}
 
         if not samples:
             raise ValueError("Universal optimization requires at least one sample")
@@ -732,6 +748,7 @@ class TargetedPGD:
                 step == 0
                 or (step + 1) % self.config.diagnostic_interval == 0
                 or step + 1 == self.config.universal_steps
+                or (step + 1) in wanted_snapshots
             ):
                 diagnostic_losses = self._diagnostic_losses(
                     diagnostic_samples,
@@ -797,6 +814,13 @@ class TargetedPGD:
                         "local_topk", float("nan")
                     ),
                 }
+            if (step + 1) in wanted_snapshots:
+                # Exactly what the return below would pick at this step.
+                snapshots[step + 1] = (
+                    delta.detach().clone()
+                    if self.config.checkpoint_selection == "final"
+                    else best_delta.detach().clone()
+                )
             history.append(step_record)
             if progress is not None:
                 progress(step + 1, self.config.universal_steps, step_record)
@@ -829,6 +853,7 @@ class TargetedPGD:
                 if self.config.checkpoint_selection == "final"
                 else best_diagnostic_loss
             ),
+            snapshots=snapshots,
         )
 
     def _diagnostic_losses(

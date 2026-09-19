@@ -588,3 +588,47 @@ class CheckpointSelectionIdTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CHECKPOINT_SELECTION": "last"}):
             with self.assertRaises(ValueError):
                 checkpoint_selection_setting()
+
+
+class SnapshotEpochTests(unittest.TestCase):
+    """Snapshot budgets land on the same step index a standalone run would."""
+
+    def _setting(self, **environment):
+        from setup_catalog import snapshot_epochs_setting
+
+        base = {"STEP_SIZE_SCHEDULE": "constant", **environment}
+        with mock.patch.dict(os.environ, base, clear=False):
+            return snapshot_epochs_setting()
+
+    def test_off_by_default(self) -> None:
+        for value in ("", "none", "off"):
+            with self.subTest(value=value):
+                self.assertEqual(self._setting(SNAPSHOT_EPOCHS=value), ())
+
+    def test_values_are_sorted_and_deduplicated(self) -> None:
+        self.assertEqual(self._setting(SNAPSHOT_EPOCHS="7,5,6,5"), (5.0, 6.0, 7.0))
+
+    def test_non_positive_budgets_are_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self._setting(SNAPSHOT_EPOCHS="0,5")
+
+    def test_a_decaying_step_size_is_refused(self) -> None:
+        # The equivalence only holds for a budget-independent step size.
+        with self.assertRaisesRegex(ValueError, "STEP_SIZE_SCHEDULE=constant"):
+            self._setting(SNAPSHOT_EPOCHS="5", STEP_SIZE_SCHEDULE="linear")
+
+    def test_steps_match_the_budget_derivation(self) -> None:
+        from setup_catalog import derive_steps, snapshot_steps
+
+        # A snapshot at epoch 5 must be the step a 5-epoch run would end on.
+        self.assertEqual(
+            snapshot_steps((5.0, 6.0), 224, 2),
+            (derive_steps(5.0, 224, 2), derive_steps(6.0, 224, 2)),
+        )
+
+    def test_each_budget_derives_its_own_setup_id(self) -> None:
+        names = {
+            effective_setup_id(SETUPS[f"{BASE}_eps4"], epochs)
+            for epochs in (5.0, 6.0, 7.0)
+        }
+        self.assertEqual(names, {"ep5_eps4", "ep6_eps4", "ep7_eps4"})

@@ -204,6 +204,44 @@ def checkpoint_selection_setting() -> str:
     return selection
 
 
+def snapshot_epochs_setting() -> tuple[float, ...]:
+    """Epoch boundaries at which to capture an equivalent shorter-budget delta.
+
+    Empty by default. Equivalence to a standalone run of that budget holds only
+    while the step size is independent of the total budget, so a decaying
+    STEP_SIZE_SCHEDULE is refused rather than silently producing deltas that
+    are valid perturbations but not the runs they claim to stand in for.
+    """
+
+    raw = os.environ.get("SNAPSHOT_EPOCHS", "").strip()
+    if not raw or raw.lower() in {"none", "off", "false"}:
+        return ()
+    values = tuple(sorted({float(part) for part in raw.split(",") if part.strip()}))
+    if any(value <= 0 for value in values):
+        raise ValueError(f"SNAPSHOT_EPOCHS must be positive, got {raw!r}")
+    if step_size_schedule_setting() != "constant":
+        raise ValueError(
+            "SNAPSHOT_EPOCHS requires STEP_SIZE_SCHEDULE=constant: a decaying "
+            "step size depends on the total budget, so a snapshot would not "
+            "equal a standalone run of that budget"
+        )
+    return values
+
+
+def snapshot_steps(
+    snapshot_epochs: tuple[float, ...], n_images: int, batch_size: int
+) -> tuple[int, ...]:
+    """Absolute step indices for the listed epoch boundaries.
+
+    Uses the same derivation as the run's own budget, so an integer epoch
+    lands on the same step index in a short run and a long one.
+    """
+
+    return tuple(
+        derive_steps(epochs, n_images, batch_size) for epochs in snapshot_epochs
+    )
+
+
 def _epoch_number(value: float) -> str:
     """``7.14`` -> ``7p14``; keeps fractional budgets filesystem-safe."""
 

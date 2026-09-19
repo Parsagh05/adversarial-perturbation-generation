@@ -798,3 +798,85 @@ class CheckpointSelectionTests(unittest.TestCase):
     def test_an_invalid_selection_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "checkpoint_selection"):
             AttackConfig(checkpoint_selection="last")
+
+
+def _delta_sha256(delta: torch.Tensor) -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        delta.detach().cpu().contiguous().numpy().tobytes()
+    ).hexdigest()
+
+
+class SnapshotEquivalenceTests(unittest.TestCase):
+    """A snapshot at step N must equal a standalone N-step run, exactly.
+
+    This is the gate for the whole feature: if it fails the snapshots are
+    still valid perturbations but are not the runs they claim to replace, and
+    must not be reported as a budget curve.
+    """
+
+    def _samples(self):
+        return [_Sample("object", value) for value in (0.1, 0.3, 0.5, 0.7, 0.9)]
+
+    def _run(self, steps, selection, schedule="constant", snapshot_steps=()):
+        torch.manual_seed(1234)
+        attacker = TargetedPGD(
+            _DifferentiableFakeSurrogate(),
+            AttackConfig(
+                temperature=1.0,
+                image_size=2,
+                epsilon=0.2,
+                step_size=0.05,
+                universal_steps=steps,
+                universal_batch_size=2,
+                diagnostic_interval=3,
+                seed=11,
+                random_start=True,
+                step_size_schedule=schedule,
+                checkpoint_selection=selection,
+            ),
+        )
+        return attacker.optimize_universal(
+            self._samples(),
+            lambda s: torch.full((3, 2, 2), float(s.value)),
+            target_label=1,
+            mode="global",
+            snapshot_steps=snapshot_steps,
+        )
+
+    def test_a_snapshot_equals_a_standalone_run_of_that_budget(self) -> None:
+        for selection in ("final", "best"):
+            for budget in (4, 7):
+                with self.subTest(selection=selection, budget=budget):
+                    standalone = self._run(budget, selection)
+                    longer = self._run(12, selection, snapshot_steps=(4, 7))
+                    self.assertEqual(
+                        _delta_sha256(standalone.delta),
+                        _delta_sha256(longer.snapshots[budget]),
+                    )
+
+    def test_a_decaying_step_size_breaks_the_equivalence(self) -> None:
+        # Why constant is a precondition, not a preference: with linear decay
+        # the step size depends on the total budget, so the trajectories
+        # diverge from the first iteration.
+        standalone = self._run(4, "final", schedule="linear")
+        longer = self._run(12, "final", schedule="linear", snapshot_steps=(4,))
+        self.assertNotEqual(
+            _delta_sha256(standalone.delta),
+            _delta_sha256(longer.snapshots[4]),
+        )
+
+    def test_snapshots_do_not_disturb_the_run_they_are_taken_from(self) -> None:
+        plain = self._run(12, "final")
+        snapped = self._run(12, "final", snapshot_steps=(4, 7))
+        self.assertEqual(
+            _delta_sha256(plain.delta), _delta_sha256(snapped.delta)
+        )
+
+    def test_steps_outside_the_budget_are_ignored(self) -> None:
+        result = self._run(6, "final", snapshot_steps=(0, 6, 9, -1))
+        self.assertEqual(result.snapshots, {})
+
+    def test_no_snapshots_by_default(self) -> None:
+        self.assertEqual(self._run(5, "final").snapshots, {})

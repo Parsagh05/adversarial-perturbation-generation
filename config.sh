@@ -138,6 +138,14 @@ MOMENTUM_DECAY="${MOMENTUM_DECAY:-}"
 # never beats clean returns zeros. The trajectory is the same either way; only
 # the kept point differs, and best names the setup (_best).
 CHECKPOINT_SELECTION="${CHECKPOINT_SELECTION:-final}"
+
+# Epoch boundaries at which one optimization run also captures the delta it
+# would have returned had it stopped there, so a budget sweep costs one run
+# rather than one run per point. Empty disables it. Requires
+# STEP_SIZE_SCHEDULE=constant, since a decaying step depends on the total
+# budget and the snapshot would not equal a standalone run.
+#   SNAPSHOT_EPOCHS="5,6,7"   inside a run whose SETUP_EPOCHS budget is larger
+SNAPSHOT_EPOCHS="${SNAPSHOT_EPOCHS:-}"
 MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL="${MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL:-0.20}"
 MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL="${MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL:-0.40}"
 

@@ -683,6 +683,80 @@ decision from the selection rule, and this flag does not make it.
 CHECKPOINT_SELECTION=best RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
 ```
 
+### Epoch snapshots: several budgets from one run
+
+`SNAPSHOT_EPOCHS` lists epoch boundaries at which the optimization also
+captures the delta it would have returned had it been configured to stop
+there. It is empty by default.
+
+A sweep over five, six, seven and eight epochs costs 26 epochs of optimization
+as four runs. As snapshots inside one eight-epoch run it costs eight, and the
+saving grows with the number of points. The snapshots are not approximations:
+they are the runs they replace.
+
+**The equivalence, and what it rests on.** A snapshot at epoch E inside a
+longer run is byte-identical to a standalone E-epoch run only while four
+conditions hold. Three are structural and one is enforced.
+
+| condition | status |
+|---|---|
+| step size independent of the total budget | enforced: a decaying `STEP_SIZE_SCHEDULE` is refused |
+| batch order and initialisation independent of the budget | holds: a fresh attacker per condition, seeded from `ATTACK_SEED` |
+| integer epochs land on the same step index | holds: `ceil(n_images / batch_size)` is fixed by the cohort |
+| the returned-iterate rule does not look ahead | handled for both selection modes |
+
+The last one is the subtle one. Under `CHECKPOINT_SELECTION=final` a snapshot
+is just the delta at that step. Under `best` the running best has to be taken
+**at** the boundary, because the run's global best would otherwise be
+contaminated by progress made after it, which fails silently and produces an
+artifact that looks valid. A snapshot boundary also forces a diagnostic
+evaluation regardless of `DIAGNOSTIC_INTERVAL`, since the standalone run it
+stands in for always evaluates one on its final step.
+
+The step-size condition is not a preference. Under the linear decay that used
+to be the default, the step size was a function of the total budget, so a
+twenty-epoch run at the end of epoch six was still stepping several times
+larger than a finished six-epoch run and the two trajectories diverged from
+the first iteration. That is also why the budget curves in APGD's figure 3 are
+six distinct trajectories rather than one curve read at six points: its
+checkpoints scale with the budget. None of UAP, UAT or CD-UAP uses a
+budget-normalised schedule; that convention came from the per-image
+literature, where sliceability is irrelevant because each attack targets one
+image.
+
+**The gate.** The claim is verified directly rather than argued. The test
+suite runs a short budget standalone, runs a longer budget with a snapshot at
+the short one, and compares the two deltas by SHA-256. They must match
+exactly, and it runs for both selection modes. A companion test asserts the
+opposite under a decaying schedule, so the precondition cannot quietly stop
+being a precondition.
+
+**Status.** The optimizer captures snapshots and the budgets derive their own
+setup IDs, so a snapshot at five epochs is named `ep5_...` exactly as a
+standalone run would be. Turning those captured deltas into complete,
+independently evaluable bundles is not wired up yet; see
+[the open decisions](#snapshot-bundles-not-yet-wired).
+
+### Snapshot bundles: not yet wired
+
+Emitting a snapshot as a complete bundle means one optimization pass writing
+into several setup directories, which the launcher currently forbids: it fixes
+one output directory per setup before the runner starts. Three decisions have
+to be made before that wiring is useful, and none of them is a detail.
+
+- **Which scopes a snapshot budget emits.** The per-dataset and cross-dataset
+  bundles share one optimization pass, so both come for free. `per_category`
+  and `per_image` do not, and re-running them per budget would undo the saving.
+  A snapshot setup directory holding only two of the four scopes is
+  incomplete, and `audit_generation.py` would have to be told so.
+- **Resumability on collision.** With `OVERWRITE_EXISTING=false` a snapshot
+  whose setup ID already exists from a standalone run should probably fail
+  loudly on a SHA-256 mismatch rather than skip or overwrite, because a
+  mismatch means one of the four conditions above has broken.
+- **Diagnostic cost.** Snapshots do not change generation cost but multiply
+  evaluation runs: a run with four snapshots still needs four full evaluation
+  passes downstream.
+
 `ATTACK_TRAIN_FRACTION` is folded in the same way: any value below 1.00 adds a
 `_trainNN` component, so a 20% run lands in `..._train20` and cannot overwrite
 or pool with the 100% run. A full run adds nothing, keeping existing names.
