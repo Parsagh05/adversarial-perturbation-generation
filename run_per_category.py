@@ -153,6 +153,10 @@ STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "8"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
 OVERWRITE_EXISTING = bool_env("OVERWRITE_EXISTING", False)
+# The bundle directory already holds every file the archive does; the
+# archive exists for shipping a bundle on its own. A pipeline that
+# evaluates in place pays for it and uses none of it.
+WRITE_BUNDLE_ARCHIVES = bool_env("WRITE_BUNDLE_ARCHIVES", True)
 USE_AMP = bool_env("USE_AMP", True)
 CACHE_INPUTS_IN_RAM = bool_env("CACHE_INPUTS_IN_RAM", True)
 AUTO_REDUCE_MICRO_BATCH_ON_OOM = True
@@ -976,36 +980,39 @@ for row in manifest_rows:
     if sha256_file(recorded_noise) != row["artifact_sha256"]:
         raise RuntimeError(f"Manifest checksum mismatch: {recorded_noise}")
 
-archive_path = OUTPUT_ROOT / "bundle.zip"
-if archive_path.exists():
-    archive_path.unlink()
-with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
-    for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV):
-        archive.write(path, path.name, compress_type=zipfile.ZIP_DEFLATED)
-    archive.write(attack_manifest_path, "attack_manifest.csv", compress_type=zipfile.ZIP_DEFLATED)
-    archive.write(diagnostics_path, "optimization_diagnostics.csv", compress_type=zipfile.ZIP_DEFLATED)
-    for artifact in sorted(set(noise_paths)):
-        archive.write(
-            artifact,
-            artifact.relative_to(OUTPUT_ROOT),
-            compress_type=zipfile.ZIP_STORED,
+print("\nPer-category artifacts:", len(artifact_rows))
+# Skipping the write skips the re-open check with it: that check
+# reads the archive's namelist, and there is no archive to read.
+if WRITE_BUNDLE_ARCHIVES:
+    archive_path = OUTPUT_ROOT / "bundle.zip"
+    if archive_path.exists():
+        archive_path.unlink()
+    with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
+        for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV):
+            archive.write(path, path.name, compress_type=zipfile.ZIP_DEFLATED)
+        archive.write(attack_manifest_path, "attack_manifest.csv", compress_type=zipfile.ZIP_DEFLATED)
+        archive.write(diagnostics_path, "optimization_diagnostics.csv", compress_type=zipfile.ZIP_DEFLATED)
+        for artifact in sorted(set(noise_paths)):
+            archive.write(
+                artifact,
+                artifact.relative_to(OUTPUT_ROOT),
+                compress_type=zipfile.ZIP_STORED,
+            )
+
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        archived_names = set(archive.namelist())
+    expected_archive_names = {
+        "attack_train_indices.csv",
+        "evaluation_test_indices.csv",
+        "complete_retained_indices.csv",
+        "attack_manifest.csv",
+        "optimization_diagnostics.csv",
+        *(str(row["noise_file"]).replace("\\", "/") for row in manifest_rows),
+    }
+    missing_archive_names = expected_archive_names - archived_names
+    if missing_archive_names:
+        raise RuntimeError(
+            f"ZIP bundle is missing entries: {sorted(missing_archive_names)[:5]}"
         )
 
-with zipfile.ZipFile(archive_path, "r") as archive:
-    archived_names = set(archive.namelist())
-expected_archive_names = {
-    "attack_train_indices.csv",
-    "evaluation_test_indices.csv",
-    "complete_retained_indices.csv",
-    "attack_manifest.csv",
-    "optimization_diagnostics.csv",
-    *(str(row["noise_file"]).replace("\\", "/") for row in manifest_rows),
-}
-missing_archive_names = expected_archive_names - archived_names
-if missing_archive_names:
-    raise RuntimeError(
-        f"ZIP bundle is missing entries: {sorted(missing_archive_names)[:5]}"
-    )
-
-print("\nPer-category artifacts:", len(artifact_rows))
-print("ZIP:", archive_path)
+    print("ZIP:", archive_path)

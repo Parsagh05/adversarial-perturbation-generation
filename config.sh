@@ -127,6 +127,12 @@ NORMAL_TARGET_CENTER_Y="${NORMAL_TARGET_CENTER_Y:-0.5}"
 # value from the per-image margins of a completed run; see the README.
 MARGIN_HINGE_DISPLACEMENT="${MARGIN_HINGE_DISPLACEMENT:-}"
 
+# Write bundle.zip beside each bundle. The directory already holds every
+# file the archive does; the archive exists for shipping a bundle on its
+# own, so a pipeline that evaluates in place pays for it and uses none of
+# it. false skips the write and the re-open verification with it.
+WRITE_BUNDLE_ARCHIVES="${WRITE_BUNDLE_ARCHIVES:-true}"
+
 # Gradient accumulation on the shared update: m = decay * m + g, stepping
 # along sign(m). Empty or 0 is plain sign-PGD. 0.9 is the recommended value
 # when enabling it; 1.0 never forgets, which is MI-FGSM's convention and

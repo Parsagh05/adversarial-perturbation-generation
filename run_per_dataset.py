@@ -153,6 +153,10 @@ STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "10"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
 OVERWRITE_EXISTING = bool_env("OVERWRITE_EXISTING", False)
+# The bundle directory already holds every file the archive does; the
+# archive exists for shipping a bundle on its own. A pipeline that
+# evaluates in place pays for it and uses none of it.
+WRITE_BUNDLE_ARCHIVES = bool_env("WRITE_BUNDLE_ARCHIVES", True)
 TRAIN_FRACTIONS = parse_fraction_list(
     os.environ.get("PER_DATASET_ATTACK_TRAIN_FRACTIONS", "1.0"),
     name="PER_DATASET_ATTACK_TRAIN_FRACTIONS",
@@ -907,42 +911,45 @@ for setting in TRANSFER_SETTINGS:
         if sha256_file(recorded_noise) != delivery["artifact_sha256"]:
             raise RuntimeError(f"Manifest checksum mismatch: {recorded_noise}")
 
-    archive_path = bundle / "bundle.zip"
-    if archive_path.exists():
-        archive_path.unlink()
-    with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
-        for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV):
-            archive.write(path, path.name, compress_type=zipfile.ZIP_DEFLATED)
-        archive.write(
-            attack_manifest_path, "attack_manifest.csv", compress_type=zipfile.ZIP_DEFLATED
-        )
-        archive.write(
-            diagnostics_path,
-            "optimization_diagnostics.csv",
-            compress_type=zipfile.ZIP_DEFLATED,
-        )
-        for relative in referenced:
-            archive.write(
-                bundle / relative, relative.as_posix(), compress_type=zipfile.ZIP_STORED
-            )
-
-    with zipfile.ZipFile(archive_path, "r") as archive:
-        archived_names = set(archive.namelist())
-    expected_archive_names = {
-        "attack_train_indices.csv",
-        "evaluation_test_indices.csv",
-        "complete_retained_indices.csv",
-        "attack_manifest.csv",
-        "optimization_diagnostics.csv",
-        *(Path(str(row["noise_file"])).as_posix() for row in rows),
-    }
-    missing_archive_names = expected_archive_names - archived_names
-    if missing_archive_names:
-        raise RuntimeError(
-            f"ZIP bundle is missing entries: {sorted(missing_archive_names)[:5]}"
-        )
     print(f"\n[{setting}] manifest rows: {len(rows)}  deltas: {len(referenced)}")
-    print(f"[{setting}] ZIP: {archive_path}")
+    # Skipping the write skips the re-open check with it: that check
+    # reads the archive's namelist, and there is no archive to read.
+    if WRITE_BUNDLE_ARCHIVES:
+        archive_path = bundle / "bundle.zip"
+        if archive_path.exists():
+            archive_path.unlink()
+        with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
+            for path in (ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV):
+                archive.write(path, path.name, compress_type=zipfile.ZIP_DEFLATED)
+            archive.write(
+                attack_manifest_path, "attack_manifest.csv", compress_type=zipfile.ZIP_DEFLATED
+            )
+            archive.write(
+                diagnostics_path,
+                "optimization_diagnostics.csv",
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
+            for relative in referenced:
+                archive.write(
+                    bundle / relative, relative.as_posix(), compress_type=zipfile.ZIP_STORED
+                )
+
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            archived_names = set(archive.namelist())
+        expected_archive_names = {
+            "attack_train_indices.csv",
+            "evaluation_test_indices.csv",
+            "complete_retained_indices.csv",
+            "attack_manifest.csv",
+            "optimization_diagnostics.csv",
+            *(Path(str(row["noise_file"])).as_posix() for row in rows),
+        }
+        missing_archive_names = expected_archive_names - archived_names
+        if missing_archive_names:
+            raise RuntimeError(
+                f"ZIP bundle is missing entries: {sorted(missing_archive_names)[:5]}"
+            )
+        print(f"[{setting}] ZIP: {archive_path}")
 
 print("\nPer-dataset optimization artifacts:", len(artifact_rows))
 print(
