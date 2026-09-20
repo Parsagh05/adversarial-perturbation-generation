@@ -133,6 +133,16 @@ MARGIN_HINGE_DISPLACEMENT="${MARGIN_HINGE_DISPLACEMENT:-}"
 # it. false skips the write and the re-open verification with it.
 WRITE_BUNDLE_ARCHIVES="${WRITE_BUNDLE_ARCHIVES:-true}"
 
+# Which images the per-image scope attacks. evaluation, the default,
+# uses the evaluation partition - the cohort every other scope is scored
+# on - so per-image stays comparable with them. all attacks every retained
+# image instead, which is sound on its own terms because a per-image delta
+# fits the image it attacks and holds nothing out, but it is a different
+# cohort from the other scopes and a consumer scoring the evaluation
+# partition will disagree with the manifest about the bundle's size.
+# It names the setup (all -> _alltargets), so an A/B cannot collide.
+PER_IMAGE_ATTACK_COHORT="${PER_IMAGE_ATTACK_COHORT:-evaluation}"
+
 # Gradient accumulation on the shared update: m = decay * m + g, stepping
 # along sign(m). Empty or 0 is plain sign-PGD. 0.9 is the recommended value
 # when enabling it; 1.0 never forgets, which is MI-FGSM's convention and

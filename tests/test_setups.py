@@ -1243,3 +1243,91 @@ class LauncherFieldBindingTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertNotIn("IFS=$'" + BS_CONST + "t'", script)
         self.assertIn("IFS=$'" + BS_CONST + "x1f'", script)
+
+
+class PerImageCohortTests(unittest.TestCase):
+    """Which images per-image attacks is an explicit, named setting.
+
+    The generator and the evaluator disagreed about the per-image cohort:
+    under the full split the generator attacked every retained image while
+    the evaluator scored the evaluation partition, so the evaluator found
+    4 images where the manifest claimed 8 and refused the bundle. The
+    cohort is now its own setting, defaulting to the comparable one.
+    """
+
+    def test_the_default_is_the_comparable_cohort(self) -> None:
+        from setup_catalog import per_image_cohort_setting
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PER_IMAGE_ATTACK_COHORT", None)
+            self.assertEqual(per_image_cohort_setting(), "evaluation")
+
+    def test_the_full_split_no_longer_widens_the_cohort(self) -> None:
+        """The regression: the two decisions must stay independent."""
+
+        from setup_catalog import per_image_cohort_setting
+
+        with mock.patch.dict(os.environ, {"SPLIT_PROTOCOL": "full"}):
+            os.environ.pop("PER_IMAGE_ATTACK_COHORT", None)
+            self.assertEqual(per_image_cohort_setting(), "evaluation")
+
+    def test_an_unknown_cohort_is_rejected(self) -> None:
+        from setup_catalog import per_image_cohort_setting
+
+        with mock.patch.dict(os.environ, {"PER_IMAGE_ATTACK_COHORT": "half"}):
+            with self.assertRaises(ValueError):
+                per_image_cohort_setting()
+
+    def test_only_the_wider_cohort_names_itself(self) -> None:
+        from setup_catalog import settings_tag
+
+        base = dict(
+            epsilon_label="4/255", loss_formulation="margin_topk",
+            attack_train_fraction=1.0, split_protocol="full",
+            full_data_cross=False,
+        )
+        self.assertNotIn("alltargets", settings_tag(**base))
+        self.assertIn(
+            "alltargets", settings_tag(**base, per_image_cohort="all")
+        )
+
+    def test_the_two_cohorts_cannot_share_a_directory(self) -> None:
+        """They produce different per-image bundles, so they must not collide."""
+
+        from setup_catalog import SETUPS, effective_setup_id
+
+        setup = next(iter(SETUPS.values()))
+        comparable = effective_setup_id(
+            setup, None, 1.0, "full", False, "constant", None, 0.0, "final",
+            "evaluation",
+        )
+        everything = effective_setup_id(
+            setup, None, 1.0, "full", False, "constant", None, 0.0, "final",
+            "all",
+        )
+        self.assertNotEqual(comparable, everything)
+
+    def test_the_runner_records_the_cohort_in_the_manifest(self) -> None:
+        """A bundle must say which cohort it covers, not leave it inferred."""
+
+        source = (
+            Path(__file__).resolve().parents[1] / "run_per_image.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '"per_image_attack_cohort": PER_IMAGE_ATTACK_COHORT,', source
+        )
+
+    def test_the_selection_and_the_leakage_guard_still_agree(self) -> None:
+        """Both sides read the same flag, or full aborts after doing the work."""
+
+        source = (
+            Path(__file__).resolve().parents[1] / "run_per_image.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "if not ATTACK_EVERY_IMAGE and assignments[pid] != " '"evaluation"',
+            source,
+        )
+        self.assertIn(
+            "if not ATTACK_EVERY_IMAGE and set(sample_ids) & attack_train_ids:",
+            source,
+        )

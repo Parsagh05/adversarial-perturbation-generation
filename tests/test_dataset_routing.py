@@ -162,9 +162,19 @@ class FullProtocolGuardTests(unittest.TestCase):
     purpose under `full` and a later check calls it leakage.
     """
 
-    def test_per_image_allows_attacking_the_attack_train_half_under_full(self) -> None:
+    def test_per_image_cohort_is_its_own_setting_not_a_split_side_effect(self) -> None:
+        """The wider cohort is a choice, not a consequence of SPLIT_PROTOCOL.
+
+        Coupling them meant selecting the full split silently also changed
+        which images per-image covered, which then disagreed with any
+        consumer scoring the evaluation partition.
+        """
+
         script = (ROOT / "run_per_image.py").read_text(encoding="utf-8")
-        self.assertIn('ATTACK_EVERY_IMAGE = SPLIT_PROTOCOL == "full"', script)
+        self.assertNotIn('ATTACK_EVERY_IMAGE = SPLIT_PROTOCOL == "full"', script)
+        self.assertIn(
+            'ATTACK_EVERY_IMAGE = PER_IMAGE_ATTACK_COHORT == "all"', script
+        )
         # Selection and verification must agree, or full aborts after the work.
         self.assertIn(
             "if not ATTACK_EVERY_IMAGE and set(sample_ids) & attack_train_ids:",

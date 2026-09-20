@@ -77,6 +77,44 @@ def _protocol_tag(split_protocol: str) -> str:
     return "" if split_protocol == "balanced" else "full"
 
 
+PER_IMAGE_COHORTS = ("evaluation", "all")
+
+
+def per_image_cohort_setting() -> str:
+    """Which images the per-image scope attacks.
+
+    ``evaluation`` attacks the evaluation partition, the same cohort every
+    other scope is scored on, so per-image numbers are directly comparable
+    with per_dataset and per_category and the evaluator finds the cohort it
+    expects. ``all`` attacks every retained image instead: a per-image delta
+    fits the single image it attacks, so it holds nothing out and cannot
+    leak, which makes the larger cohort defensible - but it is a different
+    cohort from the other scopes, and a consumer scoring the evaluation
+    partition will disagree with the manifest about how many images the
+    bundle covers.
+
+    This used to ride on SPLIT_PROTOCOL == "full", which silently coupled two
+    unrelated decisions: choosing the full split also changed which images
+    per-image covered.
+    """
+
+    cohort = os.environ.get("PER_IMAGE_ATTACK_COHORT", "evaluation").strip().lower()
+    if cohort not in PER_IMAGE_COHORTS:
+        raise ValueError(
+            f"PER_IMAGE_ATTACK_COHORT must be one of {PER_IMAGE_COHORTS}, "
+            f"got {cohort!r}"
+        )
+    return cohort
+
+
+def _per_image_cohort_tag(per_image_cohort: str) -> str:
+    """``all`` -> ``"alltargets"``; the comparable cohort adds nothing."""
+
+    if per_image_cohort not in PER_IMAGE_COHORTS:
+        raise ValueError(f"Unknown per-image cohort: {per_image_cohort!r}")
+    return "alltargets" if per_image_cohort == "all" else ""
+
+
 def split_protocol_setting() -> str:
     """``balanced`` (downsample each category to min) or ``full`` (keep all)."""
 
@@ -348,6 +386,7 @@ def settings_tag(
     margin_hinge_displacement: float | None = None,
     momentum_decay: float = 0.0,
     checkpoint_selection: str = "final",
+    per_image_cohort: str = "evaluation",
 ) -> str:
     """Everything that shapes the attack except the epoch budgets.
 
@@ -384,6 +423,12 @@ def settings_tag(
     fraction = _fraction_tag(attack_train_fraction)
     if fraction:
         parts.append(fraction)
+    # Only per_image reads this, but it names the whole settings directory:
+    # two runs differing in it produce different per-image bundles and must
+    # not overwrite one another.
+    cohort = _per_image_cohort_tag(per_image_cohort)
+    if cohort:
+        parts.append(cohort)
     return "_".join(parts)
 
 
@@ -430,6 +475,7 @@ def compose_setup_id(
     margin_hinge_displacement: float | None = None,
     momentum_decay: float = 0.0,
     checkpoint_selection: str = "final",
+    per_image_cohort: str = "evaluation",
 ) -> str:
     """Build the canonical ID for one effective configuration.
 
@@ -446,6 +492,7 @@ def compose_setup_id(
             epsilon_label, loss_formulation, attack_train_fraction,
             split_protocol, full_data_cross, step_size_schedule,
             margin_hinge_displacement, momentum_decay, checkpoint_selection,
+            per_image_cohort,
         ).split("_"),
     ]
     if prompt_mode == "learnable_object_agnostic":
@@ -463,6 +510,7 @@ def effective_setup_id(
     margin_hinge_displacement: float | None = None,
     momentum_decay: float = 0.0,
     checkpoint_selection: str = "final",
+    per_image_cohort: str = "evaluation",
 ) -> str:
     """Canonical ID for a catalog entry after any epoch/fraction override.
 
@@ -484,6 +532,7 @@ def effective_setup_id(
         margin_hinge_displacement,
         momentum_decay,
         checkpoint_selection,
+        per_image_cohort,
     )
 
 

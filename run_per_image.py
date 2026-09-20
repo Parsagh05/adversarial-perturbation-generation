@@ -47,6 +47,7 @@ if not ANOMALYCLIP_ROOT.exists():
 from setup_catalog import (
     checkpoint_selection_setting,
     derive_steps,
+    per_image_cohort_setting,
     scope_output_path,
     snapshot_targets,
 )
@@ -245,9 +246,13 @@ attack_train_ids = {pid for pid, part in assignments.items() if part == "attack_
 
 SPLIT_PROTOCOL = split_protocol()
 # Per-image fits the very image it attacks, so the train/evaluation split does
-# not constrain it. Under "full" it therefore covers every test image; the
-# historical protocol keeps it on the evaluation partition only.
-ATTACK_EVERY_IMAGE = SPLIT_PROTOCOL == "full"
+# not constrain it and a larger cohort is defensible. It is still a choice, and
+# its own setting rather than a side effect of SPLIT_PROTOCOL: the default
+# attacks the evaluation partition, the cohort every other scope is scored on,
+# so per-image numbers stay comparable and a consumer scoring that partition
+# agrees with the manifest about how many images the bundle covers.
+PER_IMAGE_ATTACK_COHORT = per_image_cohort_setting()
+ATTACK_EVERY_IMAGE = PER_IMAGE_ATTACK_COHORT == "all"
 
 # Deterministic nested evaluation subset per dataset/category/label. Full=1.0 by default.
 evaluation_samples = []
@@ -666,6 +671,7 @@ for row in artifact_rows:
     manifest_rows.append({
         "setup_id": SETUP_ID,
         "scope": "per_image",
+        "per_image_attack_cohort": PER_IMAGE_ATTACK_COHORT,
         "source_dataset": row["source_dataset"],
         "target_dataset": row["target_dataset"],
         "category": row["category"],

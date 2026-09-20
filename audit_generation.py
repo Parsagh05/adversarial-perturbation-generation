@@ -25,6 +25,7 @@ from setup_catalog import (
     checkpoint_selection_setting,
     margin_hinge_setting,
     momentum_decay_setting,
+    per_image_cohort_setting,
     split_protocol_setting,
     step_size_schedule_setting,
 )
@@ -52,6 +53,7 @@ STEP_SIZE_SCHEDULE = step_size_schedule_setting()
 MARGIN_HINGE = margin_hinge_setting()
 MOMENTUM_DECAY = momentum_decay_setting()
 CHECKPOINT_SELECTION = checkpoint_selection_setting()
+PER_IMAGE_ATTACK_COHORT = per_image_cohort_setting()
 CROSS_DATASET_FULL_SOURCE = FULL_DATA_CROSS
 # Read the same way the runners read it, so auditing a run that generated one
 # direction checks for that direction instead of reporting the other missing.
@@ -463,7 +465,7 @@ def main() -> None:
         effective_id = effective_setup_id(
             setup, SMOKE_EPOCHS if SMOKE else None, ATTACK_TRAIN_FRACTION,
             SPLIT_PROTOCOL, FULL_DATA_CROSS, STEP_SIZE_SCHEDULE, MARGIN_HINGE,
-            MOMENTUM_DECAY, CHECKPOINT_SELECTION,
+            MOMENTUM_DECAY, CHECKPOINT_SELECTION, PER_IMAGE_ATTACK_COHORT,
         )
         expected_cross_tag = "_fullcross" if FULL_DATA_CROSS else "_halfcross"
         other_cross_tag = "_halfcross" if FULL_DATA_CROSS else "_fullcross"
@@ -476,7 +478,7 @@ def main() -> None:
         settings = settings_tag(
             setup.epsilon_label, setup.loss_formulation, ATTACK_TRAIN_FRACTION,
             SPLIT_PROTOCOL, FULL_DATA_CROSS, STEP_SIZE_SCHEDULE, MARGIN_HINGE,
-            MOMENTUM_DECAY, CHECKPOINT_SELECTION,
+            MOMENTUM_DECAY, CHECKPOINT_SELECTION, PER_IMAGE_ATTACK_COHORT,
         )
         budget = (
             (SMOKE_EPOCHS,) * 4 if SMOKE else

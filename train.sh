@@ -24,6 +24,7 @@ export USE_AMP="${USE_AMP:-true}"
 export CACHE_INPUTS_IN_RAM="${CACHE_INPUTS_IN_RAM:-true}"
 export OVERWRITE_EXISTING="${OVERWRITE_EXISTING:-false}"
 export WRITE_BUNDLE_ARCHIVES="${WRITE_BUNDLE_ARCHIVES:-true}"
+export PER_IMAGE_ATTACK_COHORT="${PER_IMAGE_ATTACK_COHORT:-evaluation}"
 export PER_IMAGE_EVALUATION_FRACTION="${PER_IMAGE_EVALUATION_FRACTION:-1.0}"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export PYTHONUNBUFFERED=1
@@ -107,6 +108,7 @@ from setup_catalog import (
     settings_tag,
     margin_hinge_setting,
     momentum_decay_setting,
+    per_image_cohort_setting,
     snapshot_epochs_setting,
     split_protocol_setting,
     step_size_schedule_setting,
@@ -123,6 +125,7 @@ schedule = step_size_schedule_setting()
 hinge = margin_hinge_setting()
 momentum = momentum_decay_setting()
 selection = checkpoint_selection_setting()
+cohort = per_image_cohort_setting()
 # A snapshot budget is an ordinary setup that happens to be produced by a
 # longer run. Emitting it as another row means the launcher, the audit and the
 # packaging treat it exactly like a standalone run, which is the point.
@@ -134,7 +137,7 @@ def name_for(setup, budget):
     return compose_setup_id(
         *budget, setup.epsilon_label, setup.loss_formulation, setup.prompt_mode,
         fraction, protocol, full_data_cross, schedule, hinge, momentum,
-        selection,
+        selection, cohort,
     )
 
 for setup_id, setup in SETUPS.items():
@@ -145,7 +148,7 @@ for setup_id, setup in SETUPS.items():
     image_epochs = setup.image_epochs if override is None else override
     effective = effective_setup_id(
         setup, override, fraction, protocol, full_data_cross, schedule, hinge,
-        momentum, selection,
+        momentum, selection, cohort,
     )
     if effective in produced:
         # A single step override collapses every step count onto one name, so
@@ -180,7 +183,7 @@ for setup_id, setup in SETUPS.items():
     )
     settings = settings_tag(
         setup.epsilon_label, setup.loss_formulation, fraction, protocol,
-        full_data_cross, schedule, hinge, momentum, selection,
+        full_data_cross, schedule, hinge, momentum, selection, cohort,
     )
     for index, (row_budget, row_name) in enumerate(rows):
         print("\x1f".join((
