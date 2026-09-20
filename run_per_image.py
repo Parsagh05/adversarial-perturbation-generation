@@ -131,19 +131,6 @@ PER_IMAGE_EPOCHS = float(os.environ["PER_IMAGE_EPOCHS"])
 PER_IMAGE_STEPS = derive_steps(PER_IMAGE_EPOCHS, 1, 1)
 # Shorter budgets this run also produces. A per-image delta trains on one
 # image, so an epoch is a step and the image component maps straight across.
-SETTINGS_TAG = os.environ["SETTINGS_TAG"]
-SNAPSHOT_TARGETS = [
-    (
-        budget,
-        Path(setups).expanduser().resolve()
-        / scope_output_path("per_image", budget, PROMPT_MODE, SETTINGS_TAG),
-    )
-    for budget, setups in snapshot_targets()
-]
-SNAPSHOT_IMAGE_STEPS = {
-    derive_steps(budget[3], 1, 1): (budget, root)
-    for budget, root in SNAPSHOT_TARGETS
-}
 EFFECTIVE_BATCH_SIZE = int(os.environ.get("PER_IMAGE_EFFECTIVE_BATCH_SIZE", "2"))
 MICRO_BATCH_SIZE = int(os.environ.get("PER_IMAGE_MICRO_BATCH_SIZE", "2"))
 LOCAL_FOCAL_WEIGHT = float(os.environ.get("LOCAL_FOCAL_WEIGHT", "0.5"))
@@ -173,6 +160,24 @@ if LOSS_FORMULATION not in VALID_LOSS_FORMULATIONS:
 PROMPT_MODE = os.environ.get("PROMPT_MODE", "frozen_winclip")
 if PROMPT_MODE not in VALID_PROMPT_MODES:
     raise ValueError(f"Unknown PROMPT_MODE: {PROMPT_MODE}")
+
+# Kept below PROMPT_MODE: this reads it, and a list comprehension only
+# evaluates its element expression once the iterable yields, so an empty
+# snapshot_targets() would hide the forward reference until the day
+# SNAPSHOT_EPOCHS is finally set.
+SETTINGS_TAG = os.environ["SETTINGS_TAG"]
+SNAPSHOT_TARGETS = [
+    (
+        budget,
+        Path(setups).expanduser().resolve()
+        / scope_output_path("per_image", budget, PROMPT_MODE, SETTINGS_TAG),
+    )
+    for budget, setups in snapshot_targets()
+]
+SNAPSHOT_IMAGE_STEPS = {
+    derive_steps(budget[3], 1, 1): (budget, root)
+    for budget, root in SNAPSHOT_TARGETS
+}
 MARGIN_TOPK_FRACTIONS = {
     "normal_to_abnormal": float(os.environ.get("MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL", "0.20")),
     "abnormal_to_normal": float(os.environ.get("MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL", "0.40")),

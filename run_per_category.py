@@ -148,15 +148,6 @@ MARGIN_HINGE_DISPLACEMENT = margin_hinge_setting()
 MOMENTUM_DECAY = momentum_decay_setting()
 # Shorter budgets this run also produces, each into the setup directory the
 # launcher assigned it. A category delta uses the category component.
-SETTINGS_TAG = os.environ["SETTINGS_TAG"]
-SNAPSHOT_TARGETS = [
-    (
-        budget,
-        Path(setups).expanduser().resolve()
-        / scope_output_path("per_category", budget, PROMPT_MODE, SETTINGS_TAG),
-    )
-    for budget, setups in snapshot_targets()
-]
 CHECKPOINT_SELECTION = checkpoint_selection_setting()
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "8"))
@@ -177,6 +168,20 @@ if LOSS_FORMULATION not in VALID_LOSS_FORMULATIONS:
 PROMPT_MODE = os.environ.get("PROMPT_MODE", "frozen_winclip")
 if PROMPT_MODE not in VALID_PROMPT_MODES:
     raise ValueError(f"Unknown PROMPT_MODE: {PROMPT_MODE}")
+
+# Kept below PROMPT_MODE: this reads it, and a list comprehension only
+# evaluates its element expression once the iterable yields, so an empty
+# snapshot_targets() would hide the forward reference until the day
+# SNAPSHOT_EPOCHS is finally set.
+SETTINGS_TAG = os.environ["SETTINGS_TAG"]
+SNAPSHOT_TARGETS = [
+    (
+        budget,
+        Path(setups).expanduser().resolve()
+        / scope_output_path("per_category", budget, PROMPT_MODE, SETTINGS_TAG),
+    )
+    for budget, setups in snapshot_targets()
+]
 MARGIN_TOPK_FRACTIONS = {
     "normal_to_abnormal": float(os.environ.get("MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL", "0.20")),
     "abnormal_to_normal": float(os.environ.get("MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL", "0.40")),
