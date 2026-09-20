@@ -29,6 +29,25 @@ class UniversalAttackResult:
     snapshots: Dict[int, torch.Tensor] = field(default_factory=dict)
 
 
+def scatter_rows(
+    destination: torch.Tensor, index: torch.Tensor, source: torch.Tensor
+) -> None:
+    """Scatter ``source`` into ``destination`` at ``index``, matching dtype.
+
+    The accumulation buffers are allocated from the float32 visual features,
+    while under ``torch.autocast`` the logits come back in the autocast dtype.
+    ``index_copy_`` rejects a dtype mismatch instead of promoting the way the
+    surrounding additions do, so the source is cast to the destination.
+
+    Casting the source rather than allocating the buffer in the autocast dtype
+    keeps the reduction in float32, which is the usual AMP convention and
+    leaves the numerics unchanged when autocast is off, where the cast is a
+    no-op.
+    """
+
+    destination.index_copy_(0, index, source.to(destination.dtype))
+
+
 def direction_labels(direction: str) -> Tuple[int, int]:
     """Return ``(source_label, target_label)`` for a threat direction."""
 
@@ -103,7 +122,7 @@ class TargetedPGD:
                 )
                 if self.config.loss_formulation == "margin_topk":
                     global_margin = global_logits[:, 1] - global_logits[:, 0]
-                    per_sample_global.index_copy_(0, index_tensor, global_margin)
+                    scatter_rows(per_sample_global, index_tensor, global_margin)
                     signed = direction_sign * global_margin
                     if hinge_floors is not None:
                         floor = hinge_floors["global"].index_select(0, index_tensor)
@@ -253,7 +272,7 @@ class TargetedPGD:
                     per_image_topk = anomaly_map.topk(
                         topk_count, dim=1, largest=True, sorted=False
                     ).values.mean(dim=1)
-                    per_sample_local.index_copy_(0, index_tensor, per_image_topk)
+                    scatter_rows(per_sample_local, index_tensor, per_image_topk)
                     signed = direction_sign * per_image_topk
                     if hinge_floors is not None:
                         floor = hinge_floors["local"].index_select(0, index_tensor)
@@ -471,7 +490,7 @@ class TargetedPGD:
                     bank,
                     self.config.temperature,
                 )
-                global_logits.index_copy_(0, index_tensor, category_global)
+                scatter_rows(global_logits, index_tensor, category_global)
                 if include_local and local_logits is not None:
                     layer_logits = []
                     for patch in patch_features:
@@ -483,7 +502,7 @@ class TargetedPGD:
                         )
                         layer_logits.append(patch_logits.mean(dim=1))
                     category_local = torch.stack(layer_logits).mean(dim=0)
-                    local_logits.index_copy_(0, index_tensor, category_local)
+                    scatter_rows(local_logits, index_tensor, category_local)
 
             global_scores = global_logits.softmax(dim=-1)[:, 1]
             if mode == "global":
