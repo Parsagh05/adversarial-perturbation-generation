@@ -928,3 +928,36 @@ class PerImageSnapshotEquivalenceTests(unittest.TestCase):
 
     def test_no_sink_means_no_capture(self) -> None:
         self._run(10, "final", snapshot_steps=(3,))
+
+class RandomBaselineTests(unittest.TestCase):
+    """The unoptimised control delta that RANDOM_BASELINE writes."""
+
+    def _delta(self, seed: int, epsilon: float = 4.0 / 255.0) -> torch.Tensor:
+        attacker = TargetedPGD(
+            _DifferentiableFakeSurrogate(),
+            AttackConfig(image_size=518, epsilon=epsilon),
+        )
+        sample = SimpleNamespace(category="object", protocol_id="p0")
+        result = attacker.random_universal(
+            [sample], lambda s: torch.full((3, 518, 518), 0.5), 1, "global",
+            seed=seed,
+        )
+        self.assertEqual(result.history, [])
+        self.assertEqual(result.snapshots, {})
+        self.assertEqual(result.diagnostic_sample_ids, ["p0"])
+        self.assertEqual(result.selected_diagnostic_loss, result.final_losses["total"])
+        return result.delta
+
+    def test_every_value_is_exactly_plus_or_minus_epsilon(self) -> None:
+        epsilon = 4.0 / 255.0
+        delta = self._delta(7, epsilon)
+        self.assertEqual(tuple(delta.shape), (1, 3, 518, 518))
+        self.assertTrue(bool((delta.abs() == epsilon).all()))
+        # Both signs occur, roughly equally.
+        self.assertAlmostEqual(float((delta > 0).float().mean()), 0.5, delta=0.01)
+
+    def test_the_same_seed_gives_the_same_delta(self) -> None:
+        self.assertTrue(torch.equal(self._delta(7), self._delta(7)))
+
+    def test_different_seeds_give_different_deltas(self) -> None:
+        self.assertFalse(torch.equal(self._delta(7), self._delta(8)))

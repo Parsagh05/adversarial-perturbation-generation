@@ -25,6 +25,10 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
+# Better to fail loudly than to write optimised deltas under a _random name.
+if os.environ.get("RANDOM_BASELINE", "false").strip().lower() in {"1", "true", "yes", "on"}:
+    raise SystemExit(f"RANDOM_BASELINE is implemented for run_per_dataset.py only, not {os.path.basename(__file__)}")
+
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 if not torch.cuda.is_available():
     raise RuntimeError("A CUDA-capable GPU is required")
@@ -51,6 +55,7 @@ from setup_catalog import (
     momentum_decay_setting,
     checkpoint_selection_setting,
     scope_output_path,
+    snapshot_setup_id,
     snapshot_targets,
 )
 from adversarial_harness.attacks import TargetedPGD, direction_labels
@@ -61,9 +66,16 @@ from adversarial_harness.prompts import (
     PROMPT_PROVENANCE_FIELDS,
     VALID_PROMPT_MODES,
     learnable_prompt_checkpoint,
+    prompt_setup_record,
 )
 from common import (
     COMPLETE_RETAINED_CSV,
+    build_generation_payload,
+    finish_generation_config,
+    finish_running_generation_configs,
+    start_generation_configs,
+    start_snapshot_generation_config,
+    update_generation_config,
     LABEL_BALANCE_POLICY,
     split_protocol,
     assert_partition_disjoint,
@@ -625,6 +637,35 @@ ATTACK_CODE_SHA256 = sha256_file(
 )
 protocol_sha = split_sha256()
 artifact_rows = []
+prompt_records = {
+    dataset: prompt_setup_record(dataset, PROMPT_MODE) for dataset in DATASETS
+}
+
+
+def generation_payload(setup_id=SETUP_ID, overrides=None):
+    """generation_config.json for one bundle; overrides describe a snapshot."""
+
+    return build_generation_payload(
+        Path(__file__),
+        globals(),
+        setup={
+            "setup_id": setup_id,
+            "settings_tag": SETTINGS_TAG,
+            "scope": "category",
+            "epochs": (overrides or {}).get("PER_CATEGORY_EPOCHS", PER_CATEGORY_EPOCHS),
+            "prompt_mode": PROMPT_MODE,
+            "prompts": prompt_records,
+        },
+        attack_config=attack_config,
+        csv_paths=(ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV),
+        overrides=overrides,
+    )
+
+
+# Before any optimisation, so even a crashed run says what it was asked to do.
+start_generation_configs(
+    {OUTPUT_ROOT: generation_payload()}, overwrite=OVERWRITE_EXISTING
+)
 
 for dataset_name in DATASETS:
     categories = sorted({s.category for s in samples if s.dataset == dataset_name})
@@ -686,6 +727,18 @@ for dataset_name in DATASETS:
                     }
                     condition_config = replace(
                         condition_config, universal_steps=condition_steps
+                    )
+                    condition_key = "/".join(
+                        (dataset_name, fraction_tag(fraction), category, direction)
+                    )
+                    update_generation_config(
+                        OUTPUT_ROOT,
+                        optimization_steps={condition_key: {
+                            "epochs": PER_CATEGORY_EPOCHS,
+                            "train_images": len(train_samples),
+                            "batch_size": EFFECTIVE_BATCH_SIZE,
+                            "steps": condition_steps,
+                        }},
                     )
                     if not train_samples or not attacked_eval:
                         raise RuntimeError(
@@ -845,6 +898,23 @@ for dataset_name in DATASETS:
                                 captured = result.snapshots.get(steps)
                                 if captured is None:
                                     continue
+                                start_snapshot_generation_config(
+                                    root,
+                                    generation_payload(
+                                        snapshot_setup_id(budget),
+                                        {"PER_CATEGORY_EPOCHS": budget[2]},
+                                    ),
+                                    overwrite=OVERWRITE_EXISTING,
+                                )
+                                update_generation_config(
+                                    root,
+                                    optimization_steps={condition_key: {
+                                        "epochs": budget[2],
+                                        "train_images": len(train_samples),
+                                        "batch_size": EFFECTIVE_BATCH_SIZE,
+                                        "steps": steps,
+                                    }},
+                                )
                                 write_snapshot_artifact(
                                     captured, metadata, attacker, train_samples,
                                     target_label, loss_mode, budget[2], steps,
@@ -1016,3 +1086,7 @@ if WRITE_BUNDLE_ARCHIVES:
         )
 
     print("ZIP:", archive_path)
+
+finish_generation_config(OUTPUT_ROOT)
+# The snapshot folders this run wrote into.
+finish_running_generation_configs()

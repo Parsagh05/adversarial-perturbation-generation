@@ -2,12 +2,20 @@
 """Shared paths, split handling, and small utilities for all attack modes."""
 from __future__ import annotations
 
+import ast
+import dataclasses
 import gc
 import hashlib
+import json
 import math
 import os
+import platform
 import random
+import re
+import socket
+import subprocess
 import sys
+from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -544,6 +552,412 @@ def select_attack_train_fraction(
         if int(info["attack_train_rank"]) <= keep:
             selected.append(sample)
     return selected
+
+
+# --- generation_config.json -------------------------------------------------
+# One human-readable record per bundle folder, written before any optimisation
+# so that even a crashed run says what it was asked to do. "setup" and
+# "hyperparameters" are what a resume must agree with; everything else is
+# provenance and is never compared.
+
+GENERATION_CONFIG_NAME = "generation_config.json"
+GENERATION_CONFIG_SCHEMA_VERSION = 1
+GENERATION_CONFIG_COMPARED_SECTIONS = ("setup", "hyperparameters")
+# Module constants that are recorded elsewhere in the file (setup, code) or
+# are not settings at all.
+_NOT_SETTINGS = frozenset({
+    "SETUP_ID", "SETTINGS_TAG", "PROMPT_MODE",
+    "REPO_COMMIT", "ANOMALYCLIP_COMMIT",
+    "GENERATOR_SCRIPT_SHA256", "ATTACK_CODE_SHA256",
+    "IMAGE_CACHE", "MASK_CACHE", "BUNDLE_SCOPES",
+})
+# Knobs that change how a run executes but not the deltas it produces, so a
+# resume may change them: micro-batching is exact by construction and is tuned
+# to the GPU. Recorded under "execution", never compared.
+EXECUTION_SETTINGS = frozenset({
+    "OVERWRITE_EXISTING", "WRITE_BUNDLE_ARCHIVES", "CACHE_INPUTS_IN_RAM",
+    "MICRO_BATCH_SIZE", "AUTO_REDUCE_MICRO_BATCH_ON_OOM",
+})
+# Read through an f-string in adversarial_harness/prompts.py, so the source
+# scan below cannot see them.
+_DYNAMIC_ENVIRONMENT_NAMES = (
+    "LEARNABLE_PROMPT_MVTEC_CHECKPOINT", "LEARNABLE_PROMPT_VISA_CHECKPOINT",
+)
+_ENVIRONMENT_READ = re.compile(
+    r"(?:environ(?:\.get|\.setdefault|\.pop)?\s*[\[(]|getenv\(|bool_env\("
+    r"|csv_tuple\(|_dataset_selection\(|_unique_list\(|_csv_env\()\s*"
+    r"[\"']([A-Z][A-Z0-9_]*)[\"']"
+)
+_NOT_PLAIN = object()
+
+
+def _plain(value):
+    """``value`` as JSON data, or ``_NOT_PLAIN`` when it holds anything else.
+
+    Paths, tensors and objects are not settings; they are recorded in the
+    data and environment sections instead.
+    """
+
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, (tuple, list)):
+        items = [_plain(item) for item in value]
+        return _NOT_PLAIN if any(item is _NOT_PLAIN for item in items) else items
+    if isinstance(value, Mapping):
+        items = {str(key): _plain(item) for key, item in value.items()}
+        return _NOT_PLAIN if any(item is _NOT_PLAIN for item in items.values()) else items
+    return _NOT_PLAIN
+
+
+def _script_constants(script_path: Path) -> list[str]:
+    """Every top-level ``UPPER_CASE = ...`` the script itself assigns."""
+
+    tree = ast.parse(Path(script_path).read_text(encoding="utf-8"))
+    names = []
+    for node in tree.body:
+        targets = (
+            node.targets if isinstance(node, ast.Assign)
+            else [node.target] if isinstance(node, ast.AnnAssign) else []
+        )
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id.isupper() and target.id not in names:
+                names.append(target.id)
+    return names
+
+
+def script_settings(
+    script_path: Path, namespace: Mapping, overrides: Mapping | None = None
+) -> tuple[dict, dict]:
+    """``(hyperparameters, execution)`` resolved from the script's own constants.
+
+    Derived from what the script assigns rather than listed by hand, so a new
+    setting cannot be left out: it lands in hyperparameters, and therefore in
+    the resume check, unless it is named in EXECUTION_SETTINGS.
+    """
+
+    values = {**namespace, **(overrides or {})}
+    hyperparameters, execution = {}, {}
+    for name in _script_constants(script_path):
+        if name in _NOT_SETTINGS or name not in values:
+            continue
+        value = _plain(values[name])
+        if value is _NOT_PLAIN:
+            continue
+        (execution if name in EXECUTION_SETTINGS else hyperparameters)[name.lower()] = value
+    return hyperparameters, execution
+
+
+def environment_record(script_path: Path) -> dict:
+    """The raw value of every variable the script and its modules read.
+
+    A whitelist taken from the source, never the whole environment: that can
+    hold credentials. Unset variables are recorded as null.
+    """
+
+    sources = [
+        Path(script_path), PROJECT_ROOT / "common.py", PROJECT_ROOT / "setup_catalog.py",
+        *sorted((PROJECT_ROOT / "adversarial_harness").glob("*.py")),
+    ]
+    names = set(_DYNAMIC_ENVIRONMENT_NAMES)
+    for source in sources:
+        if source.is_file():
+            names.update(_ENVIRONMENT_READ.findall(source.read_text(encoding="utf-8")))
+    return {name: os.environ.get(name) for name in sorted(names)}
+
+
+def git_state(path: Path) -> dict:
+    """Commit and dirtiness of the checkout at ``path``; null when not a checkout."""
+
+    def run(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(path), *args], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+
+    try:
+        return {
+            "commit": run("rev-parse", "HEAD"),
+            "dirty": bool(run("status", "--porcelain", "--untracked-files=no")),
+        }
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return {"commit": None, "dirty": None}
+
+
+def prompt_training_commit() -> str | None:
+    """The object-agnostic prompt-training checkout, where one exists."""
+
+    local = os.environ.get("PROMPT_TRAINING_ROOT", "").strip()
+    root = Path(local).expanduser() if local else WORK_DIR / "object-agnostic-prompt-training"
+    return git_state(root)["commit"] if root.is_dir() else None
+
+
+def protocol_data_record(csv_paths: Sequence[Path]) -> dict:
+    """The split fingerprint, each partition CSV, and its image counts."""
+
+    digest = hashlib.sha256()
+    files = {}
+    for path in csv_paths:
+        path = Path(path)
+        digest.update(path.read_bytes())
+        frame = pd.read_csv(path, usecols=["dataset", "label"])
+        counts = {}
+        for (dataset, label), count in frame.groupby(["dataset", "label"]).size().items():
+            counts.setdefault(str(dataset), {})[str(label)] = int(count)
+        files[path.name] = {
+            "path": str(path),
+            "sha256": sha256_file(path),
+            "image_counts_by_dataset_and_label": counts,
+        }
+    return {"protocol_split_sha256": digest.hexdigest(), "files": files}
+
+
+def runtime_record() -> dict:
+    return {
+        "hostname": socket.gethostname(),
+        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "python_version": platform.python_version(),
+    }
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def generation_config_path(bundle_dir: Path) -> Path:
+    return Path(bundle_dir) / GENERATION_CONFIG_NAME
+
+
+def write_generation_config(bundle_dir: Path, payload: Mapping) -> Path:
+    """Write ``bundle_dir/generation_config.json`` atomically.
+
+    A reader never sees a half-written file: the JSON goes to a temporary file
+    beside it, which then replaces the old one in a single rename.
+    """
+
+    path = generation_config_path(bundle_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    return path
+
+
+def read_generation_config(bundle_dir: Path) -> dict | None:
+    path = generation_config_path(bundle_dir)
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _differing_keys(old, new, prefix: str = "") -> list[str]:
+    if isinstance(old, dict) and isinstance(new, dict):
+        keys = []
+        for key in sorted(set(old) | set(new)):
+            keys.extend(_differing_keys(
+                old.get(key, _NOT_PLAIN), new.get(key, _NOT_PLAIN), f"{prefix}{key}."
+            ))
+        return keys
+    return [] if old == new else [prefix.rstrip(".")]
+
+
+def check_generation_config(bundle_dir: Path, payload: Mapping) -> None:
+    """Stop when an earlier run in this folder used a different configuration.
+
+    Only setup and hyperparameters are compared. Some of them - the margin
+    top-k fraction among them - are not part of the setup ID, so without this
+    two different runs could land in the same folder and reuse each other.
+    """
+
+    existing = read_generation_config(bundle_dir)
+    if existing is None:
+        return
+    # Round-trip so tuples and lists compare alike, as they were stored.
+    current = json.loads(json.dumps(payload))
+    differing = [
+        f"{section}.{key}" if key else section
+        for section in GENERATION_CONFIG_COMPARED_SECTIONS
+        for key in _differing_keys(existing.get(section), current.get(section))
+    ]
+    if differing:
+        raise RuntimeError(
+            f"{generation_config_path(bundle_dir)} was written by a run with a "
+            f"different configuration; differing keys: {', '.join(differing)}. "
+            "Use a different output folder, set OVERWRITE_EXISTING=true to "
+            "regenerate, or delete that file if the difference is intended."
+        )
+
+
+def start_generation_configs(
+    records: Mapping[Path, Mapping], *, overwrite: bool
+) -> list[Path]:
+    """Check every folder first, then mark each one running.
+
+    Nothing is written when any folder conflicts, so a refused run leaves the
+    earlier records exactly as they were. Uncaught exceptions afterwards mark
+    every still-running folder failed, then propagate as before.
+    """
+
+    if not overwrite:
+        for bundle_dir, payload in records.items():
+            check_generation_config(bundle_dir, payload)
+    started = []
+    for bundle_dir, payload in records.items():
+        write_generation_config(bundle_dir, {
+            **payload,
+            "schema_version": GENERATION_CONFIG_SCHEMA_VERSION,
+            "status": "running",
+            "created_at_utc": _utc_now(),
+            "finished_at_utc": None,
+            "error": None,
+        })
+        started.append(Path(bundle_dir))
+    _watch_for_failure(started)
+    return started
+
+
+def update_generation_config(bundle_dir: Path, **fields) -> None:
+    """Replace top-level fields; a mapping merges into the mapping it replaces."""
+
+    payload = read_generation_config(bundle_dir)
+    if payload is None:
+        raise FileNotFoundError(generation_config_path(bundle_dir))
+    for key, value in fields.items():
+        if isinstance(value, Mapping) and isinstance(payload.get(key), dict):
+            payload[key] = {**payload[key], **value}
+        else:
+            payload[key] = value
+    write_generation_config(bundle_dir, payload)
+
+
+def finish_generation_config(
+    bundle_dir: Path, status: str = "completed", error: BaseException | None = None
+) -> None:
+    update_generation_config(
+        bundle_dir,
+        status=status,
+        finished_at_utc=_utc_now(),
+        error=None if error is None else f"{type(error).__name__}: {error}",
+    )
+
+
+def build_generation_payload(
+    script_path: Path,
+    namespace: Mapping,
+    *,
+    setup: Mapping,
+    attack_config,
+    csv_paths: Sequence[Path],
+    overrides: Mapping | None = None,
+) -> dict:
+    """Every section but the status fields, which the writers own.
+
+    ``overrides`` replaces script constants for a snapshot, whose own budget
+    differs from the run that produces it.
+    """
+
+    from setup_catalog import snapshot_epochs_setting
+
+    script_path = Path(script_path)
+    hyperparameters, execution = script_settings(script_path, namespace, overrides)
+    # The resolved AttackConfig holds values the scripts pass as literals
+    # (temperature, loss weights, feature layers). universal_steps and
+    # margin_topk_fraction in it are replaced per condition.
+    hyperparameters["attack_config"] = {
+        key: value
+        for key, value in (
+            (key, _plain(value))
+            for key, value in dataclasses.asdict(attack_config).items()
+        )
+        if value is not _NOT_PLAIN
+    }
+    # Execution, not a hyperparameter: a snapshot budget must stay
+    # indistinguishable from a standalone run at that budget.
+    execution["snapshot_epochs"] = _plain(snapshot_epochs_setting())
+    generator = git_state(PROJECT_ROOT)
+    return {
+        **runtime_record(),
+        "code": {
+            "generator_commit": generator["commit"],
+            "generator_working_tree_dirty": generator["dirty"],
+            "generator_script": script_path.name,
+            "generator_script_sha256": sha256_file(script_path),
+            "attack_code_sha256": sha256_file(
+                PROJECT_ROOT / "adversarial_harness" / "attacks.py"
+            ),
+            "anomalyclip_loader_commit": git_state(ANOMALYCLIP_ROOT)["commit"],
+            "prompt_training_commit": prompt_training_commit(),
+        },
+        "setup": dict(setup),
+        "hyperparameters": hyperparameters,
+        "execution": execution,
+        "data": protocol_data_record(csv_paths),
+        "environment": environment_record(script_path),
+    }
+
+
+def start_snapshot_generation_config(
+    bundle_dir: Path, payload: Mapping, *, overwrite: bool
+) -> None:
+    """The first time this run writes into a snapshot folder, start its record.
+
+    The launcher later replays that folder as an ordinary setup, whose own
+    start compares against this record, so the payload must describe the
+    snapshot's budget rather than the run that produced it.
+    """
+
+    if Path(bundle_dir) not in _WATCHED:
+        start_generation_configs({Path(bundle_dir): payload}, overwrite=overwrite)
+
+
+def finish_running_generation_configs() -> None:
+    """Mark every folder this run started and has not finished completed."""
+
+    for bundle_dir in _WATCHED:
+        if (read_generation_config(bundle_dir) or {}).get("status") == "running":
+            finish_generation_config(bundle_dir)
+
+
+_WATCHED: list[Path] = []
+
+
+def mark_failed(error: BaseException) -> None:
+    """Mark every watched folder that is still running as failed."""
+
+    for bundle_dir in _WATCHED:
+        try:
+            if (read_generation_config(bundle_dir) or {}).get("status") == "running":
+                finish_generation_config(bundle_dir, "failed", error)
+        except Exception as record_error:  # never mask the original failure
+            print(f"could not record failure in {bundle_dir}: {record_error}", file=sys.stderr)
+
+
+def _watch_for_failure(bundle_dirs: Sequence[Path]) -> None:
+    """Chain onto sys.excepthook: record the failure, then report it as before.
+
+    The runners are flat scripts, so a hook rather than a try block around the
+    whole file. The exception still propagates and the exit status is unchanged.
+    """
+
+    for bundle_dir in bundle_dirs:
+        if bundle_dir not in _WATCHED:
+            _WATCHED.append(bundle_dir)
+    if getattr(sys.excepthook, "marks_generation_failed", False):
+        return
+    previous = sys.excepthook
+
+    def hook(kind, error, traceback):
+        mark_failed(error)
+        previous(kind, error, traceback)
+
+    hook.marks_generation_failed = True
+    sys.excepthook = hook
 
 
 if __name__ == "__main__":

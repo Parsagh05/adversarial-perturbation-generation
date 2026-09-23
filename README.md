@@ -826,6 +826,28 @@ source attack transferred to both datasets. In the Kaggle notebook, set
 `SOURCE_DATASETS = ('mvtec',)` and `EVALUATION_DATASETS = ('mvtec', 'visa')`.
 Each source/evaluation selection uses a separate output/protocol directory.
 
+### Random baseline: how much of the effect is the optimization?
+
+`RANDOM_BASELINE=true` skips PGD and writes a +/- epsilon random-sign delta
+instead. The optimized deltas saturate at epsilon, so the control matches them
+in L-inf and L2 and differs only in spatial arrangement. Each dataset,
+direction and loss mode gets its own delta, seeded by the same `run_seed` the
+optimized run uses, and the losses are still measured at delta = 0 and at the
+control, so `loss_reduction` is recorded for the random delta too.
+
+The setup is named `_random`, last, so it never shares a directory with the
+optimized run it controls for. Keep every other setting equal to that run: they
+do not change a random delta, but they fix the split and the cohorts.
+
+```bash
+RANDOM_BASELINE=true MARGIN_HINGE_DISPLACEMENT=0.5 SPLIT_PROTOCOL=full \
+FULL_DATA_CROSS=false RUN_PER_CATEGORY=false RUN_PER_IMAGE=false bash train.sh
+```
+
+It covers `per_dataset` and `cross_dataset` only; `run_per_category.py` and
+`run_per_image.py` refuse to start with it set, and it cannot be combined with
+`SNAPSHOT_EPOCHS`.
+
 ## Outputs
 
 Outputs are grouped by everything that shapes the attack except how long it
@@ -863,6 +885,31 @@ Each scope directory holds only the budget that scope spends. Two runs that
 differ solely in epochs land side by side under one `<settings>`, which makes a
 budget sweep a single directory listing, and a snapshot budget is
 indistinguishable from a standalone run at the same budget.
+
+### generation_config.json
+
+Every bundle folder gets a `generation_config.json`, written before the first
+optimisation step so a crashed run is still documented. `status` goes from
+`running` to `completed`, or to `failed` with the error. Sections:
+
+- `setup` - setup ID, settings tag, scope, epoch budget, prompt mode and the
+  prompt checkpoint and ensemble sha256 per dataset.
+- `hyperparameters` - the resolved value of every constant the runner assigns,
+  taken from its source rather than a list, plus the resolved `AttackConfig`.
+- `execution` - knobs that do not change the deltas: micro-batch size,
+  input caching, archives, `OVERWRITE_EXISTING`, `SNAPSHOT_EPOCHS`.
+- `optimization_steps` - epochs, training images, batch and PGD steps per
+  condition, filled in as each condition starts (dataset and category scopes;
+  per-image steps are `hyperparameters.per_image_steps`).
+- `code`, `data`, `environment`, plus host, GPU, torch, CUDA and Python
+  versions. `environment` holds only variables the code reads by name.
+
+With `OVERWRITE_EXISTING=false`, a run into a folder whose record has a
+different `setup` or `hyperparameters` stops before doing any work and names
+the differing keys. This matters for settings that are not in the setup ID,
+such as the margin top-k fraction. Status, timestamps and the other sections
+are never compared. A snapshot folder gets its own record with its own budget
+and steps, which the launcher's later replay of that setup agrees with.
 
 The split depends only on the settings, so the protocol CSVs are written once
 at `<settings>/protocol/`:

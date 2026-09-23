@@ -387,6 +387,7 @@ def settings_tag(
     momentum_decay: float = 0.0,
     checkpoint_selection: str = "final",
     per_image_cohort: str = "evaluation",
+    random_baseline: bool = False,
 ) -> str:
     """Everything that shapes the attack except the epoch budgets.
 
@@ -429,6 +430,10 @@ def settings_tag(
     cohort = _per_image_cohort_tag(per_image_cohort)
     if cohort:
         parts.append(cohort)
+    # An unoptimised control delta: it must never share a directory with the
+    # optimised run it controls for.
+    if random_baseline:
+        parts.append("random")
     return "_".join(parts)
 
 
@@ -460,6 +465,30 @@ def scope_output_path(
     ))
 
 
+def snapshot_setup_id(snapshot_budget) -> str:
+    """The setup ID the launcher gives a snapshot of the running setup.
+
+    Only the epochs component differs between the two, so it is swapped on
+    ``SETUP_ID`` using the budget the launcher exported for this run.
+    """
+
+    setup_id = os.environ["SETUP_ID"]
+    full_data_cross = full_data_cross_setting()
+    current = _epochs_tag(
+        *(
+            float(os.environ[name])
+            for name in (
+                "PER_DATASET_EPOCHS", "PER_CROSS_EPOCHS",
+                "PER_CATEGORY_EPOCHS", "PER_IMAGE_EPOCHS",
+            )
+        ),
+        full_data_cross,
+    )
+    if not setup_id.startswith(current + "_"):
+        raise ValueError(f"SETUP_ID {setup_id!r} does not start with its budget {current!r}")
+    return _epochs_tag(*snapshot_budget, full_data_cross) + setup_id[len(current):]
+
+
 def compose_setup_id(
     epochs: float,
     cross_epochs: float,
@@ -476,6 +505,7 @@ def compose_setup_id(
     momentum_decay: float = 0.0,
     checkpoint_selection: str = "final",
     per_image_cohort: str = "evaluation",
+    random_baseline: bool = False,
 ) -> str:
     """Build the canonical ID for one effective configuration.
 
@@ -492,7 +522,7 @@ def compose_setup_id(
             epsilon_label, loss_formulation, attack_train_fraction,
             split_protocol, full_data_cross, step_size_schedule,
             margin_hinge_displacement, momentum_decay, checkpoint_selection,
-            per_image_cohort,
+            per_image_cohort, random_baseline,
         ).split("_"),
     ]
     if prompt_mode == "learnable_object_agnostic":
@@ -511,6 +541,7 @@ def effective_setup_id(
     momentum_decay: float = 0.0,
     checkpoint_selection: str = "final",
     per_image_cohort: str = "evaluation",
+    random_baseline: bool = False,
 ) -> str:
     """Canonical ID for a catalog entry after any epoch/fraction override.
 
@@ -533,6 +564,7 @@ def effective_setup_id(
         momentum_decay,
         checkpoint_selection,
         per_image_cohort,
+        random_baseline,
     )
 
 

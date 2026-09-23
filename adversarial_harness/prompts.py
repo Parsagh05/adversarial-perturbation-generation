@@ -206,6 +206,42 @@ def _load_prompt_checkpoint(path: Path) -> Mapping[str, Any]:
     return payload
 
 
+def learnable_prompt_text(
+    n_ctx: int, normal_suffix: str, abnormal_suffix: str
+) -> list[str]:
+    """The two prompts a shallow checkpoint's contexts are spliced into."""
+
+    placeholder = " ".join(["X"] * n_ctx)
+    return [f"{placeholder} {normal_suffix}", f"{placeholder} {abnormal_suffix}"]
+
+
+def prompt_setup_record(dataset: str, prompt_mode: str) -> dict:
+    """The prompt fingerprints a run commits to, read without loading CLIP.
+
+    Same values the surrogate later reports as ``prompt_checkpoint_sha256`` and
+    ``prompt_ensemble_sha256``, available before any optimisation starts.
+    """
+
+    if prompt_mode == "frozen_winclip":
+        return {
+            "prompt_checkpoint_sha256": "",
+            "prompt_ensemble_sha256": frozen_ensemble_sha256(),
+        }
+    path = Path(learnable_prompt_checkpoint(dataset, prompt_mode))
+    config = _load_prompt_checkpoint(path)["prompt_config"]
+    prompt_text = learnable_prompt_text(
+        int(config.get("n_ctx", 0)),
+        str(config.get("normal_suffix", "")).strip(),
+        str(config.get("abnormal_suffix", "")).strip(),
+    )
+    return {
+        "prompt_checkpoint_sha256": _sha256_file(path),
+        "prompt_ensemble_sha256": hashlib.sha256(
+            "\n".join(prompt_text).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
 class ObjectAgnosticPromptEnsemble:
     """Restore two shallow CoOp-style contexts and encode them with public CLIP."""
 
@@ -268,11 +304,7 @@ class ObjectAgnosticPromptEnsemble:
                 f"{token_width}"
             )
 
-        placeholder = " ".join(["X"] * n_ctx)
-        prompt_text = [
-            f"{placeholder} {normal_suffix}",
-            f"{placeholder} {abnormal_suffix}",
-        ]
+        prompt_text = learnable_prompt_text(n_ctx, normal_suffix, abnormal_suffix)
         token_ids = tokenizer(prompt_text).to(self.device)
         if token_ids.ndim != 2:
             raise ValueError("Tokenizer must return a two-dimensional tensor")

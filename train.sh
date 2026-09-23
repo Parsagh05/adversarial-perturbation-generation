@@ -14,6 +14,7 @@ export ATTACK_TRAIN_FRACTION
 export FULL_DATA_CROSS="${FULL_DATA_CROSS:-true}"
 export MARGIN_HINGE_DISPLACEMENT="${MARGIN_HINGE_DISPLACEMENT:-}"
 export MOMENTUM_DECAY="${MOMENTUM_DECAY:-}"
+export RANDOM_BASELINE="${RANDOM_BASELINE:-false}"
 export CHECKPOINT_SELECTION="${CHECKPOINT_SELECTION:-final}"
 export SNAPSHOT_EPOCHS="${SNAPSHOT_EPOCHS:-}"
 export PER_IMAGE_EFFECTIVE_BATCH_SIZE="$PER_IMAGE_BATCH_SIZE"
@@ -130,6 +131,9 @@ cohort = per_image_cohort_setting()
 # longer run. Emitting it as another row means the launcher, the audit and the
 # packaging treat it exactly like a standalone run, which is the point.
 snapshots = () if override is not None else snapshot_epochs_setting()
+random_baseline = os.environ.get("RANDOM_BASELINE", "false").strip().lower() in {"1", "true", "yes", "on"}
+if random_baseline and snapshots:
+    sys.exit("RANDOM_BASELINE has no optimisation trajectory; unset SNAPSHOT_EPOCHS")
 produced = {}
 
 
@@ -148,7 +152,7 @@ for setup_id, setup in SETUPS.items():
     image_epochs = setup.image_epochs if override is None else override
     effective = effective_setup_id(
         setup, override, fraction, protocol, full_data_cross, schedule, hinge,
-        momentum, selection, cohort,
+        momentum, selection, cohort, random_baseline,
     )
     if effective in produced:
         # A single step override collapses every step count onto one name, so
@@ -184,6 +188,7 @@ for setup_id, setup in SETUPS.items():
     settings = settings_tag(
         setup.epsilon_label, setup.loss_formulation, fraction, protocol,
         full_data_cross, schedule, hinge, momentum, selection, cohort,
+        random_baseline,
     )
     for index, (row_budget, row_name) in enumerate(rows):
         print("\x1f".join((

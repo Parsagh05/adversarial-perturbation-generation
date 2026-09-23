@@ -1245,6 +1245,36 @@ class LauncherFieldBindingTests(unittest.TestCase):
         self.assertIn("IFS=$'" + BS_CONST + "x1f'", script)
 
 
+class RandomBaselineNamingTests(unittest.TestCase):
+    """A random control must never share a directory with the run it controls."""
+
+    def test_the_default_adds_nothing(self) -> None:
+        from setup_catalog import settings_tag
+
+        base = dict(epsilon_label="4/255", loss_formulation="margin_topk")
+        self.assertEqual(
+            settings_tag(**base), settings_tag(**base, random_baseline=False)
+        )
+
+    def test_random_names_itself_last(self) -> None:
+        from setup_catalog import SETUPS, effective_setup_id
+
+        setup = next(iter(SETUPS.values()))
+        args = (setup, 10.0, 1.0, "full", False, "constant", 0.5, 0.0, "final",
+                "all")
+        optimised = effective_setup_id(*args)
+        control = effective_setup_id(*args, True)
+        self.assertEqual(control, optimised + "_random")
+        self.assertTrue(optimised.endswith("_full_halfcross_alltargets"))
+
+    def test_only_per_dataset_supports_it(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for runner in ("run_per_category.py", "run_per_image.py"):
+            with self.subTest(runner=runner):
+                source = (root / runner).read_text(encoding="utf-8")
+                self.assertIn("RANDOM_BASELINE is implemented for", source)
+
+
 class PerImageCohortTests(unittest.TestCase):
     """Which images per-image attacks is an explicit, named setting.
 

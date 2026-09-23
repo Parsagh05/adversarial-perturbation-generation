@@ -48,6 +48,7 @@ from setup_catalog import (
     momentum_decay_setting,
     checkpoint_selection_setting,
     scope_output_path,
+    snapshot_setup_id,
     snapshot_targets,
 )
 from adversarial_harness.attacks import TargetedPGD, direction_labels
@@ -63,9 +64,16 @@ from adversarial_harness.prompts import (
     PROMPT_PROVENANCE_FIELDS,
     VALID_PROMPT_MODES,
     learnable_prompt_checkpoint,
+    prompt_setup_record,
 )
 from common import (
     COMPLETE_RETAINED_CSV,
+    build_generation_payload,
+    finish_generation_config,
+    finish_running_generation_configs,
+    start_generation_configs,
+    start_snapshot_generation_config,
+    update_generation_config,
     LABEL_BALANCE_POLICY,
     split_protocol,
     assert_partition_disjoint,
@@ -153,6 +161,8 @@ STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "10"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
 OVERWRITE_EXISTING = bool_env("OVERWRITE_EXISTING", False)
+# Skip PGD and write a +/- epsilon random-sign delta: the unoptimised control.
+RANDOM_BASELINE = bool_env("RANDOM_BASELINE", False)
 # The bundle directory already holds every file the archive does; the
 # archive exists for shipping a bundle on its own. A pipeline that
 # evaluates in place pays for it and uses none of it.
@@ -393,6 +403,10 @@ def reusable(pt_path: Path, expected: Dict) -> bool:
     if OVERWRITE_EXISTING or not pt_path.is_file():
         return False
     metadata = torch.load(pt_path, map_location="cpu", weights_only=False)["metadata"]
+    # A missing delta_source is an optimised delta: neither kind may stand in
+    # for the other, in either direction.
+    if metadata.get("delta_source", "optimized") != expected.get("delta_source", "optimized"):
+        return False
     return all(metadata.get(key) == value for key, value in expected.items())
 
 
@@ -441,6 +455,46 @@ GENERATOR_SCRIPT_SHA256 = sha256_file(Path(__file__))
 ATTACK_CODE_SHA256 = sha256_file(PROJECT_ROOT / "adversarial_harness" / "attacks.py")
 protocol_sha = split_sha256()
 artifact_rows = []
+prompt_records = {
+    dataset: prompt_setup_record(dataset, PROMPT_MODE) for dataset in SOURCE_DATASETS
+}
+
+
+def generation_payload(scope, setup_id=SETUP_ID, overrides=None):
+    """generation_config.json for one bundle; overrides describe a snapshot."""
+
+    epochs = {
+        "PER_DATASET_EPOCHS": PER_DATASET_EPOCHS,
+        "PER_CROSS_EPOCHS": PER_CROSS_EPOCHS,
+        **(overrides or {}),
+    }
+    return build_generation_payload(
+        Path(__file__),
+        globals(),
+        setup={
+            "setup_id": setup_id,
+            "settings_tag": SETTINGS_TAG,
+            "scope": scope,
+            "epochs": epochs[
+                "PER_CROSS_EPOCHS" if scope == "cross_dataset" else "PER_DATASET_EPOCHS"
+            ],
+            "prompt_mode": PROMPT_MODE,
+            "prompts": prompt_records,
+        },
+        attack_config=attack_config,
+        csv_paths=(ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV),
+        overrides=overrides,
+    )
+
+
+# Before any optimisation, so even a crashed run says what it was asked to do.
+start_generation_configs(
+    {
+        BUNDLE_DIRECTORIES[setting]: generation_payload(BUNDLE_SCOPES[setting])
+        for setting in TRANSFER_SETTINGS
+    },
+    overwrite=OVERWRITE_EXISTING,
+)
 
 for source_dataset in SOURCE_DATASETS:
     categories = sorted({s.category for s in samples if s.dataset == source_dataset})
@@ -491,6 +545,21 @@ for source_dataset in SOURCE_DATASETS:
                 condition_config = replace(
                     condition_config, universal_steps=condition_steps
                 )
+                condition_key = "/".join(
+                    part for part in (
+                        source_dataset, fraction_tag(fraction), direction, partition_key
+                    ) if part
+                )
+                for setting in partition_settings:
+                    update_generation_config(
+                        BUNDLE_DIRECTORIES[setting],
+                        optimization_steps={condition_key: {
+                            "epochs": condition_epochs,
+                            "train_images": len(source_train),
+                            "batch_size": UNIVERSAL_BATCH_SIZE,
+                            "steps": condition_steps,
+                        }},
+                    )
                 if not source_train:
                     raise RuntimeError(
                         f"No attack_train images for {source_dataset}/{fraction}/{direction}"
@@ -504,6 +573,9 @@ for source_dataset in SOURCE_DATASETS:
                     pt_path.parent.mkdir(parents=True, exist_ok=True)
                     expected = {
                         "format_version": "canonical_clip_per_dataset_segmentation_loss_v2",
+                        # Only the control records it, so the optimised deltas
+                        # already on disk stay reusable; see reusable().
+                        **({"delta_source": "random_rademacher"} if RANDOM_BASELINE else {}),
                         "source_dataset": source_dataset,
                         "scope": "dataset",
                         "direction": direction,
@@ -592,21 +664,33 @@ for source_dataset in SOURCE_DATASETS:
                                 postfix["full_train"] = f"{fixed:.6f}"
                             bar.set_postfix(postfix)
 
-                        result = attacker.optimize_universal(
-                            source_train,
-                            image_loader,
-                            target_label,
-                            loss_mode,
-                            mask_loader=(
-                                mask_loader
-                                if LOSS_FORMULATION == "ce_focal_dice"
-                                and loss_mode in {"local", "combined"}
-                                else None
-                            ),
-                            diagnostic_samples=source_train,
-                            progress=progress,
-                            snapshot_steps=tuple(snapshot_budgets),
+                        condition_mask_loader = (
+                            mask_loader
+                            if LOSS_FORMULATION == "ce_focal_dice"
+                            and loss_mode in {"local", "combined"}
+                            else None
                         )
+                        if RANDOM_BASELINE:
+                            result = attacker.random_universal(
+                                source_train,
+                                image_loader,
+                                target_label,
+                                loss_mode,
+                                seed=run_seed,
+                                mask_loader=condition_mask_loader,
+                                diagnostic_samples=source_train,
+                            )
+                        else:
+                            result = attacker.optimize_universal(
+                                source_train,
+                                image_loader,
+                                target_label,
+                                loss_mode,
+                                mask_loader=condition_mask_loader,
+                                diagnostic_samples=source_train,
+                                progress=progress,
+                                snapshot_steps=tuple(snapshot_budgets),
+                            )
                         bar.close()
                         delta = result.delta.detach().cpu().float()
                         actual_linf = float(delta.abs().max())
@@ -631,7 +715,10 @@ for source_dataset in SOURCE_DATASETS:
                             "run_seed": run_seed,
                             "source_label": source_label,
                             "target_label": target_label,
-                            "attack_generator": "frozen_public_CLIP_surrogate",
+                            "attack_generator": (
+                                "random_rademacher_control" if RANDOM_BASELINE
+                                else "frozen_public_CLIP_surrogate"
+                            ),
                             "target_model_access_during_optimization": False,
                             "target_model_training_or_finetuning": False,
                             "optimization_partition": (
@@ -663,8 +750,12 @@ for source_dataset in SOURCE_DATASETS:
                             "protocol_evaluation_csv": str(EVALUATION_CSV),
                             "protocol_complete_retained_csv": str(COMPLETE_RETAINED_CSV),
                             "notes": (
+                                "One unoptimised random-sign control delta (+/- epsilon per "
+                                "pixel), seeded by run_seed; its losses are measured on "
+                                if RANDOM_BASELINE else
                                 "One source-dataset universal delta, optimized exactly once on "
-                                + (
+                            ) + (
+                                (
                                     "the complete source test dataset for delivery only to the "
                                     "complete other dataset."
                                     if use_full_source else
@@ -679,6 +770,27 @@ for source_dataset in SOURCE_DATASETS:
                             captured = result.snapshots.get(steps)
                             if captured is None:
                                 continue
+                            start_snapshot_generation_config(
+                                root,
+                                generation_payload(
+                                    "dataset",
+                                    snapshot_setup_id(budget),
+                                    {
+                                        "PER_DATASET_EPOCHS": budget[0],
+                                        "PER_CROSS_EPOCHS": budget[1],
+                                    },
+                                ),
+                                overwrite=OVERWRITE_EXISTING,
+                            )
+                            update_generation_config(
+                                root,
+                                optimization_steps={condition_key: {
+                                    "epochs": budget[1] if use_full_source else budget[0],
+                                    "train_images": len(source_train),
+                                    "batch_size": UNIVERSAL_BATCH_SIZE,
+                                    "steps": steps,
+                                }},
+                            )
                             write_snapshot_artifact(
                                 captured,
                                 metadata,
@@ -950,7 +1062,10 @@ for setting in TRANSFER_SETTINGS:
                 f"ZIP bundle is missing entries: {sorted(missing_archive_names)[:5]}"
             )
         print(f"[{setting}] ZIP: {archive_path}")
+    finish_generation_config(bundle)
 
+# The snapshot folders this run wrote into.
+finish_running_generation_configs()
 print("\nPer-dataset optimization artifacts:", len(artifact_rows))
 print(
     "Expected optimizations:",

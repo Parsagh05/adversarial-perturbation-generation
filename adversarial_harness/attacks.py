@@ -892,6 +892,69 @@ class TargetedPGD:
             snapshots=snapshots,
         )
 
+    def random_universal(
+        self,
+        samples: Sequence[object],
+        image_loader: Callable[[object], torch.Tensor],
+        target_label: int,
+        mode: str,
+        *,
+        seed: int,
+        mask_loader: Optional[Callable[[object], torch.Tensor]] = None,
+        diagnostic_samples: Optional[Sequence[object]] = None,
+    ) -> UniversalAttackResult:
+        """An unoptimised control: +/- epsilon with random signs.
+
+        Same shape as ``optimize_universal``'s delta. The optimised deltas
+        saturate at epsilon, so this matches them in L-inf and L2 and only the
+        spatial arrangement differs.
+        """
+
+        size = self.config.image_size
+        # CPU generator: the same seed gives the same delta on any GPU.
+        generator = torch.Generator().manual_seed(int(seed))
+        signs = torch.randint(0, 2, (1, 3, size, size), generator=generator).float() * 2 - 1
+        delta = (signs * self.config.epsilon).to(self.device)
+
+        diagnostic_samples = list(diagnostic_samples or samples[:1])
+        diagnostic_ids = [
+            str(
+                getattr(
+                    sample,
+                    "protocol_id",
+                    getattr(sample, "sample_id", index),
+                )
+            )
+            for index, sample in enumerate(diagnostic_samples)
+        ]
+        # Same bookkeeping as a real run: losses at delta = 0, then at the control.
+        initial_losses = self._diagnostic_losses(
+            diagnostic_samples,
+            image_loader,
+            torch.zeros_like(delta),
+            target_label,
+            mode,
+            mask_loader=mask_loader,
+        )
+        final_losses = self._diagnostic_losses(
+            diagnostic_samples,
+            image_loader,
+            delta,
+            target_label,
+            mode,
+            mask_loader=mask_loader,
+        )
+        return UniversalAttackResult(
+            delta=delta,
+            history=[],
+            initial_losses=initial_losses,
+            final_losses=final_losses,
+            diagnostic_sample_ids=diagnostic_ids,
+            selected_step=0,
+            selected_diagnostic_loss=final_losses["total"],
+            snapshots={},
+        )
+
     def _diagnostic_losses(
         self,
         samples: Sequence[object],

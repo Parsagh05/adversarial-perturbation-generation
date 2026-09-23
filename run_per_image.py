@@ -24,6 +24,10 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
+# Better to fail loudly than to write optimised deltas under a _random name.
+if os.environ.get("RANDOM_BASELINE", "false").strip().lower() in {"1", "true", "yes", "on"}:
+    raise SystemExit(f"RANDOM_BASELINE is implemented for run_per_dataset.py only, not {os.path.basename(__file__)}")
+
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 if not torch.cuda.is_available():
     raise RuntimeError("A CUDA-capable GPU is required")
@@ -59,9 +63,13 @@ from adversarial_harness.prompts import (
     PROMPT_PROVENANCE_FIELDS,
     VALID_PROMPT_MODES,
     learnable_prompt_checkpoint,
+    prompt_setup_record,
 )
 from common import (
     COMPLETE_RETAINED_CSV,
+    build_generation_payload,
+    finish_generation_config,
+    start_generation_configs,
     LABEL_BALANCE_POLICY,
     split_protocol,
     assert_partition_disjoint,
@@ -487,6 +495,30 @@ protocol_sha = split_sha256()
 artifact_rows = []
 seed_everything(SEED)
 
+# Before any optimisation, so even a crashed run says what it was asked to do.
+start_generation_configs(
+    {
+        OUTPUT_ROOT: build_generation_payload(
+            Path(__file__),
+            globals(),
+            setup={
+                "setup_id": SETUP_ID,
+                "settings_tag": SETTINGS_TAG,
+                "scope": "per_image",
+                "epochs": PER_IMAGE_EPOCHS,
+                "prompt_mode": PROMPT_MODE,
+                "prompts": {
+                    dataset: prompt_setup_record(dataset, PROMPT_MODE)
+                    for dataset in DATASETS
+                },
+            },
+            attack_config=attack_config,
+            csv_paths=(ATTACK_TRAIN_CSV, EVALUATION_CSV, COMPLETE_RETAINED_CSV),
+        )
+    },
+    overwrite=OVERWRITE_EXISTING,
+)
+
 for dataset_name in DATASETS:
     categories = sorted({s.category for s in evaluation_samples if s.dataset == dataset_name})
     prompt_checkpoint = learnable_prompt_checkpoint(dataset_name, PROMPT_MODE)
@@ -807,3 +839,5 @@ if WRITE_BUNDLE_ARCHIVES:
         )
 
     print("ZIP:", archive_path)
+
+finish_generation_config(OUTPUT_ROOT)
