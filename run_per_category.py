@@ -33,9 +33,9 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 if not torch.cuda.is_available():
     raise RuntimeError("A CUDA-capable GPU is required")
 
-# Strict fp32: TF32 keeps fp32's range but only ~10 mantissa bits, and PyTorch
-# enables it for convolutions by default. Both switches off, so every scope
-# computes the same numbers the public fp32 CLIP would.
+# TF32 keeps fp32's range but only ~10 mantissa bits, and PyTorch enables it
+# for convolutions by default. Both switches off, so whatever runs outside bf16
+# autocast (and the whole attack when USE_AMP=false) is strict fp32.
 ALLOW_TF32 = False
 torch.backends.cuda.matmul.allow_tf32 = ALLOW_TF32
 torch.backends.cudnn.allow_tf32 = ALLOW_TF32
@@ -173,8 +173,8 @@ OVERWRITE_EXISTING = bool_env("OVERWRITE_EXISTING", False)
 # archive exists for shipping a bundle on its own. A pipeline that
 # evaluates in place pays for it and uses none of it.
 WRITE_BUNDLE_ARCHIVES = bool_env("WRITE_BUNDLE_ARCHIVES", True)
-# fp32 by default, like run_per_dataset.py; bf16 autocast is an explicit opt-in.
-USE_AMP = bool_env("USE_AMP", False)
+# bf16 autocast by default on bf16-capable GPUs; USE_AMP=false forces fp32.
+USE_AMP = bool_env("USE_AMP", True)
 CACHE_INPUTS_IN_RAM = bool_env("CACHE_INPUTS_IN_RAM", True)
 AUTO_REDUCE_MICRO_BATCH_ON_OOM = True
 TRAIN_FRACTIONS = parse_fraction_list(

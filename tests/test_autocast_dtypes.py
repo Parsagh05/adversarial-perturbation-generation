@@ -1,7 +1,7 @@
 """The objective must survive mixed precision.
 
 run_per_category.py and run_per_image.py wrap the objective in
-torch.autocast(bfloat16) when USE_AMP=true (off by default); run_per_dataset.py
+torch.autocast(bfloat16) when USE_AMP=true (the default); run_per_dataset.py
 never does.
 Under autocast the logits come back in the autocast dtype while the
 accumulation buffers are allocated from the float32 visual features, and
@@ -169,13 +169,16 @@ class PrecisionDefaultTests(unittest.TestCase):
 
     ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
 
-    def test_every_scope_defaults_to_fp32(self) -> None:
+    def test_bf16_is_the_default_where_autocast_exists(self) -> None:
         for runner in ("run_per_category.py", "run_per_image.py"):
             with self.subTest(runner=runner):
                 source = (self.ROOT / runner).read_text(encoding="utf-8")
-                self.assertIn('USE_AMP = bool_env("USE_AMP", False)', source)
+                self.assertIn('USE_AMP = bool_env("USE_AMP", True)', source)
+                # bf16 only: fp16 gradients underflow and zero sign-PGD steps.
+                self.assertIn("torch.bfloat16", source)
+                self.assertNotIn("torch.float16", source)
         launcher = (self.ROOT / "train.sh").read_text(encoding="utf-8")
-        self.assertIn('export USE_AMP="${USE_AMP:-false}"', launcher)
+        self.assertIn('export USE_AMP="${USE_AMP:-true}"', launcher)
         dataset = (self.ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
         self.assertNotIn("autocast", dataset)
 
