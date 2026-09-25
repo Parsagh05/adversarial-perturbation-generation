@@ -1,7 +1,8 @@
 """The objective must survive mixed precision.
 
 run_per_category.py and run_per_image.py wrap the objective in
-torch.autocast(bfloat16) (USE_AMP defaults true); run_per_dataset.py does not.
+torch.autocast(bfloat16) when USE_AMP=true (off by default); run_per_dataset.py
+never does.
 Under autocast the logits come back in the autocast dtype while the
 accumulation buffers are allocated from the float32 visual features, and
 index_copy_ rejects a dtype mismatch instead of promoting it the way the
@@ -158,6 +159,52 @@ class AutocastDtypeTests(unittest.TestCase):
         gradient, = torch.autograd.grad(losses["total"], global_features)
         self.assertTrue(torch.isfinite(gradient).all())
         self.assertGreater(float(gradient.abs().sum()), 0.0)
+
+
+class PrecisionDefaultTests(unittest.TestCase):
+    """fp32 unless asked, and a delta's precision decides whether it is reused.
+
+    The runners need CUDA, so these read their source.
+    """
+
+    ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
+
+    def test_every_scope_defaults_to_fp32(self) -> None:
+        for runner in ("run_per_category.py", "run_per_image.py"):
+            with self.subTest(runner=runner):
+                source = (self.ROOT / runner).read_text(encoding="utf-8")
+                self.assertIn('USE_AMP = bool_env("USE_AMP", False)', source)
+        launcher = (self.ROOT / "train.sh").read_text(encoding="utf-8")
+        self.assertIn('export USE_AMP="${USE_AMP:-false}"', launcher)
+        dataset = (self.ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
+        self.assertNotIn("autocast", dataset)
+
+    def test_every_scope_disables_tf32(self) -> None:
+        """PyTorch enables TF32 for convolutions by default, so it must be set."""
+
+        for runner in ("run_per_dataset.py", "run_per_category.py", "run_per_image.py"):
+            with self.subTest(runner=runner):
+                source = (self.ROOT / runner).read_text(encoding="utf-8")
+                self.assertIn("ALLOW_TF32 = False", source)
+                self.assertIn("torch.backends.cuda.matmul.allow_tf32 = ALLOW_TF32", source)
+                self.assertIn("torch.backends.cudnn.allow_tf32 = ALLOW_TF32", source)
+                self.assertNotIn("allow_tf32 = True", source)
+                start = source.index("expected = {")
+                end = source.index("reusable(pt_path, expected)")
+                self.assertIn('"allow_tf32": ALLOW_TF32,', source[start:end])
+
+    def test_precision_is_part_of_the_reuse_key(self) -> None:
+        for runner in ("run_per_category.py", "run_per_image.py"):
+            with self.subTest(runner=runner):
+                source = (self.ROOT / runner).read_text(encoding="utf-8")
+                self.assertIn(
+                    '"autocast_dtype": AMP_DTYPE_NAME if AMP_ENABLED else "float32",',
+                    source,
+                )
+                # The reuse key is only checked if it sits inside `expected`.
+                start = source.index("expected = {")
+                end = source.index("reusable(pt_path, expected)")
+                self.assertIn('"autocast_dtype"', source[start:end])
 
 
 if __name__ == "__main__":

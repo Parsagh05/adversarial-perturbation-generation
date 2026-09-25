@@ -29,6 +29,13 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 if not torch.cuda.is_available():
     raise RuntimeError("A CUDA-capable GPU is required")
 
+# Strict fp32: TF32 keeps fp32's range but only ~10 mantissa bits, and PyTorch
+# enables it for convolutions by default. Both switches off, so every scope
+# computes the same numbers the public fp32 CLIP would.
+ALLOW_TF32 = False
+torch.backends.cuda.matmul.allow_tf32 = ALLOW_TF32
+torch.backends.cudnn.allow_tf32 = ALLOW_TF32
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 WORKING = Path(os.environ["WORK_DIR"]).expanduser().resolve()
 ANOMALYCLIP_ROOT = WORKING / "AnomalyCLIP"
@@ -573,6 +580,7 @@ for source_dataset in SOURCE_DATASETS:
                     pt_path.parent.mkdir(parents=True, exist_ok=True)
                     expected = {
                         "format_version": "canonical_clip_per_dataset_segmentation_loss_v2",
+                        "allow_tf32": ALLOW_TF32,
                         # Only the control records it, so the optimised deltas
                         # already on disk stay reusable; see reusable().
                         **({"delta_source": "random_rademacher"} if RANDOM_BASELINE else {}),

@@ -378,9 +378,13 @@ but no VisA image enters optimization. Per-category and per-image outputs use
   initial losses and loss reductions are measured from `delta=0` rather than
   from the random start, and a run that never beats "no attack" is reported as
   such instead of being credited with the random start's loss.
-- Universal scopes use mixed precision only on bf16-capable hardware. Sign-PGD
+- Every scope runs in strict fp32 by default: TF32 is off for both matrix
+  multiplies and convolutions (`ALLOW_TF32`; PyTorch enables it for
+  convolutions unless told otherwise). `USE_AMP=true` opts per_category and
+  per_image into bf16 autocast, and only on bf16-capable hardware: sign-PGD
   reads `gradient.sign()`, so an underflowed fp16 gradient would silently zero
-  part of the update; the attack falls back to fp32 elsewhere.
+  part of the update. The precision is part of each delta's reuse key, so a
+  delta made at one precision is never reused by a run at another.
 - Every bundle includes `optimization_diagnostics.csv`.
 - Artifact reuse checks include all loss/schedule settings, generator hashes,
   repository commit, and the pinned AnomalyCLIP commit.

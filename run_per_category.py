@@ -33,8 +33,12 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 if not torch.cuda.is_available():
     raise RuntimeError("A CUDA-capable GPU is required")
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+# Strict fp32: TF32 keeps fp32's range but only ~10 mantissa bits, and PyTorch
+# enables it for convolutions by default. Both switches off, so every scope
+# computes the same numbers the public fp32 CLIP would.
+ALLOW_TF32 = False
+torch.backends.cuda.matmul.allow_tf32 = ALLOW_TF32
+torch.backends.cudnn.allow_tf32 = ALLOW_TF32
 torch.backends.cudnn.benchmark = True
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -169,7 +173,8 @@ OVERWRITE_EXISTING = bool_env("OVERWRITE_EXISTING", False)
 # archive exists for shipping a bundle on its own. A pipeline that
 # evaluates in place pays for it and uses none of it.
 WRITE_BUNDLE_ARCHIVES = bool_env("WRITE_BUNDLE_ARCHIVES", True)
-USE_AMP = bool_env("USE_AMP", True)
+# fp32 by default, like run_per_dataset.py; bf16 autocast is an explicit opt-in.
+USE_AMP = bool_env("USE_AMP", False)
 CACHE_INPUTS_IN_RAM = bool_env("CACHE_INPUTS_IN_RAM", True)
 AUTO_REDUCE_MICRO_BATCH_ON_OOM = True
 TRAIN_FRACTIONS = parse_fraction_list(
@@ -751,6 +756,9 @@ for dataset_name in DATASETS:
                         pt_path.parent.mkdir(parents=True, exist_ok=True)
                         expected = {
                             "format_version": "canonical_clip_per_category_segmentation_loss_v2",
+                            "allow_tf32": ALLOW_TF32,
+                            # Precision changes the delta, so a bf16 delta is never reused as fp32.
+                            "autocast_dtype": AMP_DTYPE_NAME if AMP_ENABLED else "float32",
                             "source_dataset": dataset_name,
                             "target_dataset": dataset_name,
                             "scope": "per_category",
