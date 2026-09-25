@@ -26,6 +26,12 @@ from .prompts import (
 )
 
 
+# The surrogate is OpenAI's own CLIP package at this commit (requirements.txt
+# pins the same one); it is part of every delta's reuse key.
+SURROGATE_CLIP = "openai/CLIP@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6"
+# The final block only, as plain CLIP reads its patch tokens.
+SURROGATE_FEATURE_LAYERS = (24,)
+
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
@@ -73,7 +79,7 @@ class CLIPSurrogate:
         anomalyclip_root: str,
         categories: Sequence[str],
         device: str,
-        feature_layers: Sequence[int] = (6, 12, 18, 24),
+        feature_layers: Sequence[int] = SURROGATE_FEATURE_LAYERS,
         clip_model_name: str = "ViT-L/14@336px",
         clip_download_root: str = "",
         prompt_mode: str = "frozen_winclip",
@@ -82,26 +88,35 @@ class CLIPSurrogate:
     ) -> None:
         self.device = torch.device(device)
         self.feature_layers = tuple(feature_layers)
-        _, library, prompt_module = _prepare_anomalyclip_import(anomalyclip_root)
-        self.library = library
+        # OpenAI's own package, not AnomalyCLIP's copy of it: the same weights,
+        # blocks, tokenizer and forward as clip.load. anomalyclip_root is kept
+        # for the callers' provenance only.
+        import clip as openai_clip
+
         cache = clip_download_root or os.environ.get("ANOMALYCLIP_CLIP_CACHE", "")
-        load_kwargs = {
-            "device": self.device,
-        }
-        if cache:
-            load_kwargs["download_root"] = str(Path(cache).expanduser())
-        # The surrogate uses ordinary manual text prompts, so it must use the
-        # public CLIP text transformer. Passing AnomalyCLIP's design_details
-        # enables the compound-prompt transformer, whose encode_text path does
-        # not accept a plain token tensor in the official implementation.
-        self.model, _ = library.load(clip_model_name, **load_kwargs)
-        self.model.eval()
+        self.model, _ = openai_clip.load(
+            clip_model_name,
+            device=self.device,
+            jit=False,
+            download_root=str(Path(cache).expanduser()) if cache else None,
+        )
+        # clip.load casts the model to fp16 on a GPU. Precision is set by the
+        # runners instead (fp32 weights, bf16 autocast by default), so undo it;
+        # the released weights are fp16 values either way.
+        self.model.float().eval()
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
-        # Deliberately do not call DAPM_replace: this is the public CLIP path.
-        # The current official repository's plain CLIP encode_image method does
-        # not accept AnomalyCLIP's DPAM_layer/features-list arguments. Capture
-        # the requested original-CLIP transformer layers with forward hooks.
+        visual = self.model.visual
+        self._patch_size = int(visual.conv1.kernel_size[0])
+        # clip.load only accepts its native 336 px. The target detectors run
+        # this CLIP at 518 px by stretching the positional grid bilinearly
+        # (AnomalyCLIP's VisionTransformer.forward); encode_visual does the
+        # same from the untouched native grid.
+        self._native_positional_embedding = visual.positional_embedding.detach().clone()
+        self._position_grid = int(round((self._native_positional_embedding.shape[0] - 1) ** 0.5))
+        # No DPAM: this is the plain CLIP path. Plain CLIP exposes only the
+        # final CLS token, so the patch tokens of the requested blocks are read
+        # with forward hooks.
         self._captured_features: Dict[int, torch.Tensor] = {}
         self._capture_patches = False
         self._feature_handles = []
@@ -122,7 +137,7 @@ class CLIPSurrogate:
             )
         if prompt_mode == "frozen_winclip":
             self.prompts = PromptEnsemble(
-                self.model, prompt_module.tokenize, categories, str(self.device)
+                self.model, openai_clip.tokenize, categories, str(self.device)
             )
             self.prompt_provenance = {
                 "prompt_mode": "frozen_winclip",
@@ -146,7 +161,7 @@ class CLIPSurrogate:
                 )
             self.prompts = ObjectAgnosticPromptEnsemble(
                 self.model,
-                prompt_module.tokenize,
+                openai_clip.tokenize,
                 categories,
                 str(self.device),
                 learnable_prompt_checkpoint,
@@ -156,24 +171,39 @@ class CLIPSurrogate:
         else:
             raise ValueError(f"Unknown prompt_mode: {prompt_mode}")
 
+    def _fit_positional_embedding(self, side: int) -> None:
+        """Stretch the native positional grid to ``side`` x ``side`` patches.
+
+        Bilinear, align_corners=False, from the native grid: the same numbers
+        AnomalyCLIP's forward produces for the targets at 518 px.
+        """
+
+        if side == self._position_grid:
+            return
+        native = self._native_positional_embedding
+        grid = int(round((native.shape[0] - 1) ** 0.5))
+        patches = native[1:].reshape(1, grid, grid, -1).permute(0, 3, 1, 2)
+        patches = F.interpolate(
+            patches, size=(side, side), mode="bilinear", align_corners=False
+        )
+        patches = patches.permute(0, 2, 3, 1).reshape(side * side, -1)
+        self.model.visual.positional_embedding.data = torch.cat(
+            (native[:1], patches), dim=0
+        ).to(self.model.visual.positional_embedding.dtype)
+        self._position_grid = side
+
     def encode_visual(
         self, images_01: torch.Tensor, include_patches: bool = True
     ) -> Tuple[torch.Tensor, Sequence[torch.Tensor]]:
         images = normalize_clip(images_01.to(self.device))
+        self._fit_positional_embedding(images.shape[-1] // self._patch_size)
         self._captured_features.clear()
         self._capture_patches = include_patches
         try:
-            # The official plain CLIP implementation returns all final visual
-            # tokens as [B, N, D]; token zero is the global CLS representation.
-            visual_tokens = self.model.encode_image(images)
+            # Official CLIP returns ln_post(CLS) @ proj, shape [B, D].
+            global_features = self.model.encode_image(images).float()
         finally:
             self._capture_patches = False
-        if visual_tokens.ndim != 3:
-            raise RuntimeError(
-                "The public CLIP surrogate must return visual tokens with "
-                f"shape [B, N, D], got {tuple(visual_tokens.shape)}"
-            )
-        global_features = visual_tokens[:, 0, :].float()
         if not include_patches:
             return global_features, []
 

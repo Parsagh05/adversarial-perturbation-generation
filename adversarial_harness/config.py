@@ -79,7 +79,8 @@ class AttackConfig:
     step_size_schedule: str = "constant"
     step_size_min_ratio: float = 0.1
     diagnostic_interval: int = 10
-    feature_layers: Tuple[int, ...] = (6, 12, 18, 24)
+    # The final block only, as plain CLIP reads its patch tokens.
+    feature_layers: Tuple[int, ...] = (24,)
     scopes: Tuple[str, ...] = VALID_SCOPES
     directions: Tuple[str, ...] = VALID_DIRECTIONS
     loss_modes: Tuple[str, ...] = VALID_LOSS_MODES

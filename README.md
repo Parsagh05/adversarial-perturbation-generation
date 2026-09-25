@@ -54,7 +54,12 @@ this objective:
 - `combined`: the segmentation-aware local objective is combined with global
   targeted cross entropy using the existing global/local weights.
 
-The attack still uses a frozen public CLIP image/text backbone. In learnable-
+The attack still uses a frozen public CLIP image/text backbone, loaded through
+OpenAI's own `clip.load` (the `openai/CLIP` commit pinned in
+`requirements.txt`), with its tokenizer and no DPAM. The only departure from
+`clip.load` is the input size: the 336-px positional grid is stretched
+bilinearly to 518 px, exactly as the evaluated detectors run it. Patch tokens
+come from the final block only, as plain CLIP reads them. In learnable-
 prompt setups, only pre-trained shallow context tensors are restored; the CLIP
 weights remain frozen. The generator never loads or differentiates through an
 evaluated anomaly detector.
@@ -177,8 +182,8 @@ The default objective is:
 - `normal_to_abnormal` minimizes `-s(x + delta)`, which maximizes the abnormal
   margin; `abnormal_to_normal` minimizes `s(x + delta)`.
 - Pixel-level loss applies the same direction-aware sign to `TopK(H(x+delta))`,
-  where `H` is the patch-token abnormal-minus-normal margin map averaged across
-  selected CLIP layers.
+  where `H` is the patch-token abnormal-minus-normal margin map of CLIP's final
+  block (layer 24).
 - This formulation is location-free and does not read ground-truth masks.
 
 `MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL` defaults to 0.20 and

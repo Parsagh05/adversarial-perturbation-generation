@@ -67,7 +67,11 @@ from adversarial_harness.dataset import (
     load_image_tensor,
     load_mask,
 )
-from adversarial_harness.models import CLIPSurrogate
+from adversarial_harness.models import (
+    CLIPSurrogate,
+    SURROGATE_CLIP,
+    SURROGATE_FEATURE_LAYERS,
+)
 from adversarial_harness.prompts import (
     PROMPT_PROVENANCE_FIELDS,
     VALID_PROMPT_MODES,
@@ -466,7 +470,7 @@ attack_config = AttackConfig(
     momentum_decay=MOMENTUM_DECAY,
     step_size_min_ratio=STEP_SIZE_MIN_RATIO,
     diagnostic_interval=DIAGNOSTIC_INTERVAL,
-    feature_layers=(6, 12, 18, 24),
+    feature_layers=SURROGATE_FEATURE_LAYERS,
     scopes=("dataset",),
     directions=DIRECTIONS,
     loss_modes=LOSS_MODES,
@@ -600,6 +604,11 @@ for source_dataset in SOURCE_DATASETS:
                     expected = {
                         "format_version": "canonical_clip_per_dataset_segmentation_loss_v2",
                         "allow_tf32": ALLOW_TF32,
+                        # attack_code_sha256 covers attacks.py only, so the surrogate
+                        # itself is named here: a delta from another CLIP or other
+                        # layers is never reused.
+                        "surrogate_clip": SURROGATE_CLIP,
+                        "feature_layers": list(attack_config.feature_layers),
                         # Precision changes the delta, so a bf16 delta is never reused as fp32.
                         "autocast_dtype": AMP_DTYPE_NAME if AMP_ENABLED else "float32",
                         # Only the control records it, so the optimised deltas
