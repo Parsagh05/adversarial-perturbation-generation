@@ -55,6 +55,7 @@ from setup_catalog import (
     margin_hinge_setting,
     momentum_decay_setting,
     checkpoint_selection_setting,
+    optimizer_setting,
     scope_output_path,
     snapshot_setup_id,
     snapshot_targets,
@@ -168,6 +169,8 @@ NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
 STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "constant")
 MARGIN_HINGE_DISPLACEMENT = margin_hinge_setting()
 MOMENTUM_DECAY = momentum_decay_setting()
+# (name, inner batch, passes): plain sign-PGD, or SGA (Liu et al., ICCV 2023).
+OPTIMIZER = optimizer_setting()
 CHECKPOINT_SELECTION = checkpoint_selection_setting()
 STEP_SIZE_MIN_RATIO = float(os.environ.get("STEP_SIZE_MIN_RATIO", "0.1"))
 DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "10"))
@@ -175,6 +178,18 @@ SEED = int(os.environ.get("ATTACK_SEED", "111"))
 OVERWRITE_EXISTING = bool_env("OVERWRITE_EXISTING", False)
 # Skip PGD and write a +/- epsilon random-sign delta: the unoptimised control.
 RANDOM_BASELINE = bool_env("RANDOM_BASELINE", False)
+# What actually ran, recorded in generation_config.json. The random baseline
+# never optimises, so it ignores OPTIMIZER.
+OPTIMIZER_USED = (
+    {"name": "none", "note": "random baseline: no optimisation", "requested": OPTIMIZER[0]}
+    if RANDOM_BASELINE
+    else {"name": "pgd"} if OPTIMIZER[0] == "pgd"
+    else {
+        "name": "sga",
+        "sga_inner_batch_size": OPTIMIZER[1],
+        "sga_inner_passes": OPTIMIZER[2],
+    }
+)
 # The bundle directory already holds every file the archive does; the
 # archive exists for shipping a bundle on its own. A pipeline that
 # evaluates in place pays for it and uses none of it.
@@ -267,6 +282,7 @@ os.environ["ANOMALYCLIP_CLIP_CACHE"] = str(CLIP_CACHE)
 
 print("GPU:", torch.cuda.get_device_name(0))
 print("Autocast:", AMP_DTYPE_NAME if AMP_ENABLED else "disabled; fp32 sign-PGD")
+print("Optimizer:", OPTIMIZER_USED)
 print("Protocol SHA256:", split_sha256())
 print("Attack-train fractions:", TRAIN_FRACTIONS)
 print("Loss formulation:", LOSS_FORMULATION)
@@ -477,6 +493,9 @@ attack_config = AttackConfig(
     loss_modes=LOSS_MODES,
     per_image_batch_size=1,
     universal_batch_size=UNIVERSAL_BATCH_SIZE,
+    optimizer=OPTIMIZER[0],
+    sga_inner_batch_size=OPTIMIZER[1],
+    sga_inner_passes=OPTIMIZER[2],
     seed=SEED,
 )
 
@@ -609,6 +628,7 @@ for source_dataset in SOURCE_DATASETS:
                         # itself is named here: a delta from another CLIP or other
                         # layers is never reused.
                         "surrogate_clip": SURROGATE_CLIP,
+                        "optimizer": list(OPTIMIZER),
                         "feature_layers": list(attack_config.feature_layers),
                         # Precision changes the delta, so a bf16 delta is never reused as fp32.
                         "autocast_dtype": AMP_DTYPE_NAME if AMP_ENABLED else "float32",

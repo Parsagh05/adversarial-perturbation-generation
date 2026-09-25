@@ -58,11 +58,12 @@ from setup_catalog import (
     margin_hinge_setting,
     momentum_decay_setting,
     checkpoint_selection_setting,
+    optimizer_setting,
     scope_output_path,
     snapshot_setup_id,
     snapshot_targets,
 )
-from adversarial_harness.attacks import TargetedPGD, direction_labels
+from adversarial_harness.attacks import TargetedPGD, direction_labels, sga_inner_batches
 from adversarial_harness.config import AttackConfig, VALID_LOSS_FORMULATIONS
 from adversarial_harness.dataset import MVTecSample, discover_anomaly_datasets, load_image_tensor, load_mask
 from adversarial_harness.models import (
@@ -166,6 +167,17 @@ NORMAL_TARGET_CENTER_Y = float(os.environ.get("NORMAL_TARGET_CENTER_Y", "0.5"))
 STEP_SIZE_SCHEDULE = os.environ.get("STEP_SIZE_SCHEDULE", "constant")
 MARGIN_HINGE_DISPLACEMENT = margin_hinge_setting()
 MOMENTUM_DECAY = momentum_decay_setting()
+# (name, inner batch, passes): plain sign-PGD, or SGA (Liu et al., ICCV 2023).
+OPTIMIZER = optimizer_setting()
+# What actually ran, recorded in generation_config.json.
+OPTIMIZER_USED = (
+    {"name": "pgd"} if OPTIMIZER[0] == "pgd"
+    else {
+        "name": "sga",
+        "sga_inner_batch_size": OPTIMIZER[1],
+        "sga_inner_passes": OPTIMIZER[2],
+    }
+)
 # Shorter budgets this run also produces, each into the setup directory the
 # launcher assigned it. A category delta uses the category component.
 CHECKPOINT_SELECTION = checkpoint_selection_setting()
@@ -251,6 +263,7 @@ print("Attack-train fractions:", TRAIN_FRACTIONS)
 print("Epoch budget / step size:", PER_CATEGORY_EPOCHS, UNIVERSAL_STEP_SIZE)
 print("Effective batch / micro-batch:", EFFECTIVE_BATCH_SIZE, MICRO_BATCH_SIZE)
 print("Autocast:", AMP_DTYPE_NAME if AMP_ENABLED else "disabled; fp32 sign-PGD")
+print("Optimizer:", OPTIMIZER_USED)
 
 all_discovered = discover_anomaly_datasets(
     dataset=DISCOVERY_MODE,
@@ -374,64 +387,99 @@ def optimize_accumulated(
         logical_samples, cursor = draw_logical_batch(
             source_samples, order, cursor, rng, EFFECTIVE_BATCH_SIZE
         )
+        # Drawn once per step, so an OOM retry replays the same inner batches.
+        inner_batches = (
+            sga_inner_batches(
+                len(logical_samples), attacker.config.sga_inner_batch_size,
+                attacker.config.sga_inner_passes, rng,
+            )
+            if attacker.config.optimizer == "sga" else None
+        )
         while True:
             try:
-                delta_leaf = delta.detach().requires_grad_(True)
-                accumulated_global = torch.zeros_like(delta_leaf)
-                accumulated_local = torch.zeros_like(delta_leaf)
-                accumulated_total = torch.zeros_like(delta_leaf)
-                pre_loss = 0.0
+                def accumulate(point, batch):
+                    """Micro-batched mean gradient at ``point`` over ``batch``."""
 
-                for micro in chunked(logical_samples, micro_batch_size):
-                    clean = torch.stack([image_loader(s) for s in micro]).float().to(attacker.device)
-                    categories = [s.category for s in micro]
-                    masks = (
-                        torch.stack([mask_fn(s) for s in micro]).to(attacker.device)
-                        if mask_fn is not None and loss_mode in {"local", "combined"} else None
+                    delta_leaf = point.detach().requires_grad_(True)
+                    accumulated_global = torch.zeros_like(delta_leaf)
+                    accumulated_local = torch.zeros_like(delta_leaf)
+                    accumulated_total = torch.zeros_like(delta_leaf)
+                    batch_loss = 0.0
+
+                    for micro in chunked(batch, micro_batch_size):
+                        clean = torch.stack([image_loader(s) for s in micro]).float().to(attacker.device)
+                        categories = [s.category for s in micro]
+                        masks = (
+                            torch.stack([mask_fn(s) for s in micro]).to(attacker.device)
+                            if mask_fn is not None and loss_mode in {"local", "combined"} else None
+                        )
+                        micro_floors = None
+                        if hinge_floors is not None:
+                            selector = torch.as_tensor(
+                                [sample_position[s.protocol_id] for s in micro],
+                                device=attacker.device,
+                                dtype=torch.long,
+                            )
+                            micro_floors = {
+                                key: value.index_select(0, selector)
+                                for key, value in hinge_floors.items()
+                            }
+                        with autocast_context():
+                            components = attacker.objective_components(
+                                (clean + delta_leaf).clamp(0, 1), categories, target_label,
+                                loss_mode, spatial_masks=masks,
+                                hinge_floors=micro_floors,
+                            )
+                        weight = len(micro) / len(batch)
+                        batch_loss += float(components["total"].detach()) * weight
+                        if loss_mode == "combined":
+                            global_grad = torch.autograd.grad(
+                                components["global"], delta_leaf, retain_graph=True, only_inputs=True
+                            )[0]
+                            local_grad = torch.autograd.grad(
+                                components["local"], delta_leaf, only_inputs=True
+                            )[0]
+                            accumulated_global.add_(global_grad.detach(), alpha=weight)
+                            accumulated_local.add_(local_grad.detach(), alpha=weight)
+                            del global_grad, local_grad
+                        else:
+                            total_grad = torch.autograd.grad(
+                                components["total"], delta_leaf, only_inputs=True
+                            )[0]
+                            accumulated_total.add_(total_grad.detach(), alpha=weight)
+                            del total_grad
+                        del clean, masks, components
+
+                    gradient = (
+                        attacker.config.global_weight * accumulated_global
+                        + attacker.config.local_weight * accumulated_local
+                        if loss_mode == "combined" else accumulated_total
                     )
-                    micro_floors = None
-                    if hinge_floors is not None:
-                        selector = torch.as_tensor(
-                            [sample_position[s.protocol_id] for s in micro],
-                            device=attacker.device,
-                            dtype=torch.long,
-                        )
-                        micro_floors = {
-                            key: value.index_select(0, selector)
-                            for key, value in hinge_floors.items()
-                        }
-                    with autocast_context():
-                        components = attacker.objective_components(
-                            (clean + delta_leaf).clamp(0, 1), categories, target_label,
-                            loss_mode, spatial_masks=masks,
-                            hinge_floors=micro_floors,
-                        )
-                    weight = len(micro) / EFFECTIVE_BATCH_SIZE
-                    pre_loss += float(components["total"].detach()) * weight
-                    if loss_mode == "combined":
-                        global_grad = torch.autograd.grad(
-                            components["global"], delta_leaf, retain_graph=True, only_inputs=True
-                        )[0]
-                        local_grad = torch.autograd.grad(
-                            components["local"], delta_leaf, only_inputs=True
-                        )[0]
-                        accumulated_global.add_(global_grad.detach(), alpha=weight)
-                        accumulated_local.add_(local_grad.detach(), alpha=weight)
-                        del global_grad, local_grad
-                    else:
-                        total_grad = torch.autograd.grad(
-                            components["total"], delta_leaf, only_inputs=True
-                        )[0]
-                        accumulated_total.add_(total_grad.detach(), alpha=weight)
-                        del total_grad
-                    del clean, masks, components
+                    return gradient, batch_loss
 
-                gradient = (
-                    attacker.config.global_weight * accumulated_global
-                    + attacker.config.local_weight * accumulated_local
-                    if loss_mode == "combined" else accumulated_total
-                )
                 step_size = attacker.step_size_at(step, total_steps)
+                if inner_batches is None:
+                    gradient, pre_loss = accumulate(delta, logical_samples)
+                else:
+                    # SGA (Liu et al., ICCV 2023, Alg. 1): inner sign steps on small
+                    # batches from a scratch copy of delta, their raw gradients
+                    # summed, and one sign step on delta with the sum.
+                    inner_delta = delta.detach()
+                    gradient = torch.zeros_like(delta)
+                    weighted_loss = 0.0
+                    for positions in inner_batches:
+                        inner, inner_loss = accumulate(
+                            inner_delta, [logical_samples[i] for i in positions]
+                        )
+                        inner_delta = (inner_delta - step_size * inner.sign()).clamp(
+                            -EPSILON, EPSILON
+                        ).detach()
+                        gradient = gradient + inner
+                        weighted_loss += inner_loss * len(positions)
+                    # Mean loss over the inner steps, each at its own inner delta.
+                    pre_loss = weighted_loss / (
+                        len(logical_samples) * attacker.config.sga_inner_passes
+                    )
                 direction, momentum_cosine = attacker.update_direction(
                     gradient, momentum
                 )
@@ -636,6 +684,9 @@ attack_config = AttackConfig(
     loss_modes=LOSS_MODES,
     per_image_batch_size=1,
     universal_batch_size=MICRO_BATCH_SIZE,
+    optimizer=OPTIMIZER[0],
+    sga_inner_batch_size=OPTIMIZER[1],
+    sga_inner_passes=OPTIMIZER[2],
     seed=SEED,
 )
 
@@ -766,6 +817,7 @@ for dataset_name in DATASETS:
                             # itself is named here: a delta from another CLIP or other
                             # layers is never reused.
                             "surrogate_clip": SURROGATE_CLIP,
+                            "optimizer": list(OPTIMIZER),
                             "feature_layers": list(attack_config.feature_layers),
                             # Precision changes the delta, so a bf16 delta is never reused as fp32.
                             "autocast_dtype": AMP_DTYPE_NAME if AMP_ENABLED else "float32",

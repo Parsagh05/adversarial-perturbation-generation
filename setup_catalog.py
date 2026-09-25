@@ -217,6 +217,53 @@ def momentum_decay_setting() -> float:
     return value
 
 
+OPTIMIZERS = ("pgd", "sga")
+DEFAULT_OPTIMIZER = ("pgd", 2, 4)
+
+
+def _optimizer_tag(optimizer) -> str:
+    """``("sga", 2, 4)`` -> ``"sga"``; plain sign-PGD adds nothing.
+
+    SGA's defaults (inner batch 2, K = 4, the paper's best K) add nothing
+    beyond ``sga``; any other value names itself: ``sgak1``, ``sgaib1``,
+    ``sgak1ib1``.
+    """
+
+    name, inner_batch, passes = optimizer
+    if name not in OPTIMIZERS:
+        raise ValueError(f"optimizer must be one of {OPTIMIZERS}, got {name!r}")
+    if name == "pgd":
+        return ""
+    return (
+        "sga"
+        + (f"k{int(passes)}" if int(passes) != 4 else "")
+        + (f"ib{int(inner_batch)}" if int(inner_batch) != 2 else "")
+    )
+
+
+def optimizer_setting() -> tuple[str, int, int]:
+    """``(OPTIMIZER, SGA_INNER_BATCH_SIZE, SGA_INNER_PASSES)``.
+
+    pgd is plain sign-PGD. sga is Stochastic Gradient Aggregation (Liu et al.,
+    ICCV 2023): each outer batch is split into inner batches of
+    SGA_INNER_BATCH_SIZE, every image is used SGA_INNER_PASSES times (the
+    paper's K), and the inner gradients are summed into one sign step. The
+    default K = 4 is the paper's best (Fig. 5c) and costs about four times
+    PGD's compute; K = 1 keeps PGD's cost. The paper's best inner batch (10)
+    was for an outer batch of 250; with an outer batch of 8 it would collapse
+    SGA into PGD, so the default inner batch is 2.
+    """
+
+    name = os.environ.get("OPTIMIZER", "pgd").strip().lower() or "pgd"
+    if name not in OPTIMIZERS:
+        raise ValueError(f"OPTIMIZER must be one of {OPTIMIZERS}, got {name!r}")
+    inner_batch = int(os.environ.get("SGA_INNER_BATCH_SIZE", "") or 2)
+    passes = int(os.environ.get("SGA_INNER_PASSES", "") or 4)
+    if inner_batch <= 0 or passes <= 0:
+        raise ValueError("SGA_INNER_BATCH_SIZE and SGA_INNER_PASSES must be positive")
+    return (name, inner_batch, passes)
+
+
 CHECKPOINT_SELECTIONS = ("best", "final")
 
 
@@ -388,6 +435,7 @@ def settings_tag(
     checkpoint_selection: str = "final",
     per_image_cohort: str = "evaluation",
     random_baseline: bool = False,
+    optimizer=DEFAULT_OPTIMIZER,
 ) -> str:
     """Everything that shapes the attack except the epoch budgets.
 
@@ -410,6 +458,9 @@ def settings_tag(
     momentum = _momentum_tag(momentum_decay)
     if momentum:
         parts.append(momentum)
+    optimizer_tag = _optimizer_tag(optimizer)
+    if optimizer_tag:
+        parts.append(optimizer_tag)
     schedule = _schedule_tag(step_size_schedule)
     if schedule:
         parts.append(schedule)
@@ -506,6 +557,7 @@ def compose_setup_id(
     checkpoint_selection: str = "final",
     per_image_cohort: str = "evaluation",
     random_baseline: bool = False,
+    optimizer=DEFAULT_OPTIMIZER,
 ) -> str:
     """Build the canonical ID for one effective configuration.
 
@@ -522,7 +574,7 @@ def compose_setup_id(
             epsilon_label, loss_formulation, attack_train_fraction,
             split_protocol, full_data_cross, step_size_schedule,
             margin_hinge_displacement, momentum_decay, checkpoint_selection,
-            per_image_cohort, random_baseline,
+            per_image_cohort, random_baseline, optimizer,
         ).split("_"),
     ]
     if prompt_mode == "learnable_object_agnostic":
@@ -542,6 +594,7 @@ def effective_setup_id(
     checkpoint_selection: str = "final",
     per_image_cohort: str = "evaluation",
     random_baseline: bool = False,
+    optimizer=DEFAULT_OPTIMIZER,
 ) -> str:
     """Canonical ID for a catalog entry after any epoch/fraction override.
 
@@ -565,6 +618,7 @@ def effective_setup_id(
         checkpoint_selection,
         per_image_cohort,
         random_baseline,
+        optimizer,
     )
 
 

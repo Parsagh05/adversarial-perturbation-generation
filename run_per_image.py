@@ -55,6 +55,7 @@ if not ANOMALYCLIP_ROOT.exists():
 from setup_catalog import (
     checkpoint_selection_setting,
     derive_steps,
+    optimizer_setting,
     per_image_cohort_setting,
     scope_output_path,
     snapshot_targets,
@@ -166,6 +167,10 @@ DIAGNOSTIC_INTERVAL = int(os.environ.get("DIAGNOSTIC_INTERVAL", "8"))
 EVALUATION_FRACTION = float(os.environ.get("PER_IMAGE_EVALUATION_FRACTION", "1.0"))
 SEED = int(os.environ.get("ATTACK_SEED", "111"))
 OVERWRITE_EXISTING = bool_env("OVERWRITE_EXISTING", False)
+# SGA aggregates gradients across the images that share one delta; a
+# per-image delta has one image, so this scope always runs sign-PGD whatever
+# OPTIMIZER says. What ran is recorded in generation_config.json.
+OPTIMIZER_USED = {"name": "pgd", "requested": optimizer_setting()[0]}
 # The bundle directory already holds every file the archive does; the
 # archive exists for shipping a bundle on its own. A pipeline that
 # evaluates in place pays for it and uses none of it.
@@ -245,6 +250,12 @@ print("Protocol SHA256:", split_sha256())
 print("Per-image steps / step size:", PER_IMAGE_STEPS, STEP_SIZE)
 print("Evaluation fraction:", EVALUATION_FRACTION)
 print("Autocast:", AMP_DTYPE_NAME if AMP_ENABLED else "disabled; fp32 sign-PGD")
+print("Optimizer:", OPTIMIZER_USED)
+if OPTIMIZER_USED["requested"] != "pgd":
+    print(
+        f"OPTIMIZER={OPTIMIZER_USED['requested']} requested; per_image runs sign-PGD "
+        "(one image per delta has nothing to aggregate)"
+    )
 print("Per-image uses zero attack_train images; each delta sees exactly its aligned evaluation image.")
 
 all_discovered = discover_anomaly_datasets(

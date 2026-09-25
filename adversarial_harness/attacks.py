@@ -48,6 +48,26 @@ def scatter_rows(
     destination.index_copy_(0, index, source.to(destination.dtype))
 
 
+def sga_inner_batches(
+    batch_size: int, inner_batch_size: int, passes: int, rng: np.random.Generator
+) -> List[List[int]]:
+    """Positions of the outer batch, split into SGA's inner batches.
+
+    Each pass shuffles the outer batch and cuts it into inner batches, so every
+    image is used exactly ``passes`` times: the paper's K, with
+    M = K * ceil(outer / inner) inner steps.
+    """
+
+    batches: List[List[int]] = []
+    for _ in range(passes):
+        order = rng.permutation(batch_size)
+        batches.extend(
+            [int(i) for i in order[start:start + inner_batch_size]]
+            for start in range(0, batch_size, inner_batch_size)
+        )
+    return batches
+
+
 def direction_labels(direction: str) -> Tuple[int, int]:
     """Return ``(source_label, target_label)`` for a threat direction."""
 
@@ -737,41 +757,90 @@ class TargetedPGD:
                     for key, value in hinge_floors.items()
                 }
 
-            delta.requires_grad_(True)
-            adversarial = (clean + delta).clamp(0.0, 1.0)
-            components = self.objective_components(
-                adversarial,
-                categories,
-                target_label,
-                mode,
-                spatial_masks=spatial_masks,
-                hinge_floors=batch_floors,
-            )
-            global_gradient_norm = float("nan")
-            local_gradient_norm = float("nan")
-            if mode == "combined":
-                global_gradient = torch.autograd.grad(
-                    components["global"], delta, retain_graph=True, only_inputs=True
-                )[0]
-                local_gradient = torch.autograd.grad(
-                    components["local"], delta, only_inputs=True
-                )[0]
-                global_gradient_norm = float(global_gradient.norm().detach())
-                local_gradient_norm = float(local_gradient.norm().detach())
-                gradient = (
-                    self.config.global_weight * global_gradient
-                    + self.config.local_weight * local_gradient
+            def batch_gradient(point, positions):
+                """Gradient at ``point`` over the outer-batch rows ``positions``.
+
+                Returns the combined gradient, its global and local parts (None
+                when the mode has no such part) and the batch loss.
+                """
+
+                rows = torch.as_tensor(positions, device=self.device, dtype=torch.long)
+                point = point.detach().requires_grad_(True)
+                components = self.objective_components(
+                    (clean.index_select(0, rows) + point).clamp(0.0, 1.0),
+                    [categories[i] for i in positions],
+                    target_label,
+                    mode,
+                    spatial_masks=(
+                        None if spatial_masks is None
+                        else spatial_masks.index_select(0, rows)
+                    ),
+                    hinge_floors=(
+                        None if batch_floors is None
+                        else {k: v.index_select(0, rows) for k, v in batch_floors.items()}
+                    ),
+                )
+                if mode == "combined":
+                    part_global = torch.autograd.grad(
+                        components["global"], point, retain_graph=True, only_inputs=True
+                    )[0]
+                    part_local = torch.autograd.grad(
+                        components["local"], point, only_inputs=True
+                    )[0]
+                    combined = (
+                        self.config.global_weight * part_global
+                        + self.config.local_weight * part_local
+                    )
+                else:
+                    combined = torch.autograd.grad(
+                        components["total"], point, only_inputs=True
+                    )[0]
+                    part_global = combined if mode == "global" else None
+                    part_local = combined if mode == "local" else None
+                return combined, part_global, part_local, float(components["total"].detach())
+
+            step_size = self.step_size_at(step, self.config.universal_steps)
+            if self.config.optimizer == "sga":
+                # SGA (Liu et al., ICCV 2023, Alg. 1): inner sign steps on small
+                # batches from a scratch copy of delta, their raw gradients
+                # summed, and one sign step on delta with the sum.
+                inner_delta = delta.detach()
+                gradient = torch.zeros_like(delta)
+                global_gradient = torch.zeros_like(delta) if mode != "local" else None
+                local_gradient = torch.zeros_like(delta) if mode != "global" else None
+                weighted_loss = 0.0
+                for positions in sga_inner_batches(
+                    len(batch_samples), self.config.sga_inner_batch_size,
+                    self.config.sga_inner_passes, self.rng,
+                ):
+                    inner, part_global, part_local, loss = batch_gradient(
+                        inner_delta, positions
+                    )
+                    inner_delta = (inner_delta - step_size * inner.sign()).clamp(
+                        -self.config.epsilon, self.config.epsilon
+                    ).detach()
+                    gradient = gradient + inner
+                    if global_gradient is not None:
+                        global_gradient = global_gradient + part_global
+                    if local_gradient is not None:
+                        local_gradient = local_gradient + part_local
+                    weighted_loss += loss * len(positions)
+                # Mean loss over the inner steps, each at its own inner delta.
+                pre_update_loss = weighted_loss / (
+                    len(batch_samples) * self.config.sga_inner_passes
                 )
             else:
-                gradient = torch.autograd.grad(
-                    components["total"], delta, only_inputs=True
-                )[0]
-                if mode == "global":
-                    global_gradient_norm = float(gradient.norm().detach())
-                else:
-                    local_gradient_norm = float(gradient.norm().detach())
-            pre_update_loss = float(components["total"].detach())
-            step_size = self.step_size_at(step, self.config.universal_steps)
+                gradient, global_gradient, local_gradient, pre_update_loss = (
+                    batch_gradient(delta, list(range(len(batch_samples))))
+                )
+            global_gradient_norm = (
+                float(global_gradient.norm().detach())
+                if global_gradient is not None else float("nan")
+            )
+            local_gradient_norm = (
+                float(local_gradient.norm().detach())
+                if local_gradient is not None else float("nan")
+            )
             direction, momentum_cosine = self.update_direction(gradient, momentum)
             momentum = direction if self.config.momentum_decay > 0.0 else momentum
             delta = delta.detach() - step_size * direction.sign()

@@ -15,6 +15,10 @@ export FULL_DATA_CROSS="${FULL_DATA_CROSS:-true}"
 export MARGIN_HINGE_DISPLACEMENT="${MARGIN_HINGE_DISPLACEMENT:-}"
 export MOMENTUM_DECAY="${MOMENTUM_DECAY:-}"
 export RANDOM_BASELINE="${RANDOM_BASELINE:-false}"
+# pgd (default) or sga; see setup_catalog.optimizer_setting.
+export OPTIMIZER="${OPTIMIZER:-pgd}"
+export SGA_INNER_BATCH_SIZE="${SGA_INNER_BATCH_SIZE:-2}"
+export SGA_INNER_PASSES="${SGA_INNER_PASSES:-4}"
 export CHECKPOINT_SELECTION="${CHECKPOINT_SELECTION:-final}"
 export SNAPSHOT_EPOCHS="${SNAPSHOT_EPOCHS:-}"
 export PER_IMAGE_EFFECTIVE_BATCH_SIZE="$PER_IMAGE_BATCH_SIZE"
@@ -109,6 +113,7 @@ from setup_catalog import (
     settings_tag,
     margin_hinge_setting,
     momentum_decay_setting,
+    optimizer_setting,
     per_image_cohort_setting,
     snapshot_epochs_setting,
     split_protocol_setting,
@@ -134,6 +139,7 @@ snapshots = () if override is not None else snapshot_epochs_setting()
 random_baseline = os.environ.get("RANDOM_BASELINE", "false").strip().lower() in {"1", "true", "yes", "on"}
 if random_baseline and snapshots:
     sys.exit("RANDOM_BASELINE has no optimisation trajectory; unset SNAPSHOT_EPOCHS")
+optimizer = optimizer_setting()
 produced = {}
 
 
@@ -141,7 +147,7 @@ def name_for(setup, budget):
     return compose_setup_id(
         *budget, setup.epsilon_label, setup.loss_formulation, setup.prompt_mode,
         fraction, protocol, full_data_cross, schedule, hinge, momentum,
-        selection, cohort,
+        selection, cohort, random_baseline, optimizer,
     )
 
 for setup_id, setup in SETUPS.items():
@@ -152,7 +158,7 @@ for setup_id, setup in SETUPS.items():
     image_epochs = setup.image_epochs if override is None else override
     effective = effective_setup_id(
         setup, override, fraction, protocol, full_data_cross, schedule, hinge,
-        momentum, selection, cohort, random_baseline,
+        momentum, selection, cohort, random_baseline, optimizer,
     )
     if effective in produced:
         # A single step override collapses every step count onto one name, so
@@ -188,7 +194,7 @@ for setup_id, setup in SETUPS.items():
     settings = settings_tag(
         setup.epsilon_label, setup.loss_formulation, fraction, protocol,
         full_data_cross, schedule, hinge, momentum, selection, cohort,
-        random_baseline,
+        random_baseline, optimizer,
     )
     for index, (row_budget, row_name) in enumerate(rows):
         print("\x1f".join((

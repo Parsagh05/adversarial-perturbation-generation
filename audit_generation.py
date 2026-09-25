@@ -25,6 +25,7 @@ from setup_catalog import (
     checkpoint_selection_setting,
     margin_hinge_setting,
     momentum_decay_setting,
+    optimizer_setting,
     per_image_cohort_setting,
     split_protocol_setting,
     step_size_schedule_setting,
@@ -54,6 +55,7 @@ MARGIN_HINGE = margin_hinge_setting()
 MOMENTUM_DECAY = momentum_decay_setting()
 CHECKPOINT_SELECTION = checkpoint_selection_setting()
 PER_IMAGE_ATTACK_COHORT = per_image_cohort_setting()
+OPTIMIZER = optimizer_setting()
 RANDOM_BASELINE = os.environ.get("RANDOM_BASELINE", "false").strip().lower() in {
     "1", "true", "yes", "on"
 }
@@ -469,7 +471,7 @@ def main() -> None:
             setup, SMOKE_EPOCHS if SMOKE else None, ATTACK_TRAIN_FRACTION,
             SPLIT_PROTOCOL, FULL_DATA_CROSS, STEP_SIZE_SCHEDULE, MARGIN_HINGE,
             MOMENTUM_DECAY, CHECKPOINT_SELECTION, PER_IMAGE_ATTACK_COHORT,
-            RANDOM_BASELINE,
+            RANDOM_BASELINE, OPTIMIZER,
         )
         expected_cross_tag = "_fullcross" if FULL_DATA_CROSS else "_halfcross"
         other_cross_tag = "_halfcross" if FULL_DATA_CROSS else "_fullcross"
@@ -483,7 +485,7 @@ def main() -> None:
             setup.epsilon_label, setup.loss_formulation, ATTACK_TRAIN_FRACTION,
             SPLIT_PROTOCOL, FULL_DATA_CROSS, STEP_SIZE_SCHEDULE, MARGIN_HINGE,
             MOMENTUM_DECAY, CHECKPOINT_SELECTION, PER_IMAGE_ATTACK_COHORT,
-            RANDOM_BASELINE,
+            RANDOM_BASELINE, OPTIMIZER,
         )
         budget = (
             (SMOKE_EPOCHS,) * 4 if SMOKE else

@@ -17,6 +17,9 @@ VALID_NORMAL_LOCAL_TARGETS = ("fixed_region", "full_image")
 VALID_UNIVERSAL_PROTOCOLS = ("transductive", "held_out")
 VALID_THRESHOLD_MODES = ("normal_train_quantile",)
 VALID_CHECKPOINT_SELECTIONS = ("best", "final")
+# pgd: one sign step per batch. sga: Stochastic Gradient Aggregation
+# (Liu et al., ICCV 2023), several inner steps summed into one sign step.
+VALID_OPTIMIZERS = ("pgd", "sga")
 VALID_DATASETS = (
     "mvtec",
     "visa",
@@ -86,6 +89,13 @@ class AttackConfig:
     loss_modes: Tuple[str, ...] = VALID_LOSS_MODES
     per_image_batch_size: int = 1
     universal_batch_size: int = 2
+    # SGA only. Each outer batch is split into inner batches of this size;
+    # every image is used sga_inner_passes times (the paper's K), so one outer
+    # update sums K * ceil(outer / inner) inner gradients. K = 4 is the
+    # paper's best (Fig. 5c).
+    optimizer: str = "pgd"
+    sga_inner_batch_size: int = 2
+    sga_inner_passes: int = 4
     seed: int = 111
 
     def __post_init__(self) -> None:
@@ -105,6 +115,12 @@ class AttackConfig:
             raise ValueError("temperature must be positive")
         if self.per_image_batch_size <= 0 or self.universal_batch_size <= 0:
             raise ValueError("attack batch sizes must be positive")
+        if self.optimizer not in VALID_OPTIMIZERS:
+            raise ValueError(
+                f"optimizer must be one of {VALID_OPTIMIZERS}, got {self.optimizer!r}"
+            )
+        if self.sga_inner_batch_size <= 0 or self.sga_inner_passes <= 0:
+            raise ValueError("sga_inner_batch_size and sga_inner_passes must be positive")
         for value, valid, name in (
             (self.scopes, VALID_SCOPES, "scopes"),
             (self.directions, VALID_DIRECTIONS, "directions"),

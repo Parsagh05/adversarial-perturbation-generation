@@ -657,6 +657,49 @@ RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
 MOMENTUM_DECAY=0.9 RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
 ```
 
+### Optimiser: sign-PGD or SGA
+
+`OPTIMIZER=pgd` (the default) takes one sign step per batch.
+`OPTIMIZER=sga` uses Stochastic Gradient Aggregation (Liu et al., "Enhancing
+Generalization of Universal Adversarial Perturbation through Gradient
+Aggregation", ICCV 2023, Alg. 1): each outer batch is split into inner batches,
+a scratch copy of the delta takes a sign step on each, their raw gradients are
+summed, and the real delta takes one sign step on the sum. Taking the sign of
+each small batch lets weak, noisy components cancel strong ones; summing first
+keeps the magnitudes until the single quantisation.
+
+```text
+PGD:  delta -= step * sign(grad(outer batch, delta))
+SGA:  inner = delta; G = 0
+      for each inner batch b:  g = grad(b, inner); inner -= step * sign(g); G += g
+      delta -= step * sign(G)
+```
+
+- The outer batch is the scope's usual batch (`PER_DATASET_BATCH_SIZE`,
+  `PER_CATEGORY_EFFECTIVE_BATCH_SIZE`); SGA does not change it.
+- `SGA_INNER_BATCH_SIZE` (default 2): images per inner batch. The paper's best
+  (10) was for an outer batch of 250; with an outer batch of 8 it would
+  collapse SGA into PGD.
+- `SGA_INNER_PASSES` (default 4, the paper's best K, Fig. 5c): how many times
+  each outer-batch image is used per outer step. It costs about K times PGD's
+  compute; K = 1 costs the same as PGD.
+- Epochs keep their meaning: the number of real (outer) updates is the same as
+  under PGD, and momentum, the step-size schedule, checkpoint selection,
+  snapshots and diagnostics all act on the outer step.
+- Applies to `per_dataset`, `cross_dataset` and `per_category`. `per_image`
+  always runs sign-PGD (one image has nothing to aggregate), and the random
+  baseline never optimises; both ignore `OPTIMIZER`. Every bundle's
+  `generation_config.json` records what actually ran as
+  `hyperparameters.optimizer_used`, e.g. `{"name": "sga", ...}` for per_dataset
+  and `{"name": "pgd", "requested": "sga"}` for per_image.
+- Names itself: `_sga` at the defaults, `_sgak1`, `_sgaib1`, `_sgak1ib1`
+  otherwise; `pgd` adds nothing. The optimiser is part of each delta's reuse key.
+
+```bash
+OPTIMIZER=sga RUN_SETUPS=ep7p14_cat100_img100_eps4 bash train.sh
+OPTIMIZER=sga SGA_INNER_PASSES=1 bash train.sh      # PGD's compute, K = 1
+```
+
 ### Which iterate is returned
 
 `CHECKPOINT_SELECTION` decides which point of the optimization becomes the
