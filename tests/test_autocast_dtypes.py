@@ -1,8 +1,8 @@
 """The objective must survive mixed precision.
 
 run_per_category.py and run_per_image.py wrap the objective in
-torch.autocast(bfloat16) when USE_AMP=true (the default); run_per_dataset.py
-never does.
+torch.autocast(bfloat16) when USE_AMP=true (the default), as run_per_dataset.py
+does around optimize_universal.
 Under autocast the logits come back in the autocast dtype while the
 accumulation buffers are allocated from the float32 visual features, and
 index_copy_ rejects a dtype mismatch instead of promoting it the way the
@@ -161,16 +161,76 @@ class AutocastDtypeTests(unittest.TestCase):
         self.assertGreater(float(gradient.abs().sum()), 0.0)
 
 
+class _LinearSurrogate:
+    """A differentiable stand-in with a Linear layer, so bf16 autocast really
+    changes the arithmetic (it leaves element-wise ops alone)."""
+
+    device = torch.device("cpu")
+
+    def __init__(self) -> None:
+        self.prompts = _attacker("margin_topk").surrogate.prompts
+        torch.manual_seed(2)
+        self.projection = torch.nn.Linear(3, EMBEDDING)
+        self.feature_dtypes: list[torch.dtype] = []
+
+    def encode_visual(self, images_01, include_patches=True):
+        pooled = torch.nn.functional.adaptive_avg_pool2d(images_01, 4)
+        tokens = self.projection(pooled.flatten(2).transpose(1, 2))
+        self.feature_dtypes.append(tokens.dtype)
+        global_features = tokens.mean(dim=1)
+        patches = torch.cat((global_features[:, None, :], tokens), dim=1)
+        return global_features, [patches] if include_patches else []
+
+
+class UniversalUnderAutocastTests(unittest.TestCase):
+    """run_per_dataset.py runs optimize_universal inside bf16 autocast."""
+
+    def _run(self, mode: str):
+        surrogate = _LinearSurrogate()
+        attacker = TargetedPGD(surrogate, AttackConfig(
+            loss_formulation="margin_topk", image_size=8, epsilon=4 / 255,
+            step_size=1 / 255, universal_steps=12, universal_batch_size=2,
+            diagnostic_interval=4,
+        ))
+        samples = [
+            SimpleNamespace(category=CATEGORIES[i % 2], protocol_id=f"p{i}")
+            for i in range(4)
+        ]
+        images = {s.protocol_id: torch.rand(3, 8, 8) for s in samples}
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            result = attacker.optimize_universal(
+                samples, lambda s: images[s.protocol_id], 1, mode,
+                diagnostic_samples=samples,
+            )
+        return surrogate, result
+
+    def test_the_attack_runs_in_bf16_and_keeps_an_fp32_delta(self) -> None:
+        for mode in ("global", "local"):
+            with self.subTest(mode=mode):
+                surrogate, result = self._run(mode)
+                self.assertIn(torch.bfloat16, surrogate.feature_dtypes)
+                self.assertEqual(result.delta.dtype, torch.float32)
+                self.assertLessEqual(float(result.delta.abs().max()), 4 / 255 + 1e-6)
+                self.assertTrue(
+                    all(torch.isfinite(torch.tensor(v)) for v in result.final_losses.values())
+                )
+                # Every step ran and produced a finite update under bf16.
+                self.assertEqual(len(result.history), 12)
+                self.assertTrue(all(
+                    torch.isfinite(torch.tensor(row["total_loss"])) for row in result.history
+                ))
+
+
 class PrecisionDefaultTests(unittest.TestCase):
-    """fp32 unless asked, and a delta's precision decides whether it is reused.
+    """bf16 unless asked, and a delta's precision decides whether it is reused.
 
     The runners need CUDA, so these read their source.
     """
 
     ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
 
-    def test_bf16_is_the_default_where_autocast_exists(self) -> None:
-        for runner in ("run_per_category.py", "run_per_image.py"):
+    def test_bf16_is_the_default_in_every_scope(self) -> None:
+        for runner in ("run_per_dataset.py", "run_per_category.py", "run_per_image.py"):
             with self.subTest(runner=runner):
                 source = (self.ROOT / runner).read_text(encoding="utf-8")
                 self.assertIn('USE_AMP = bool_env("USE_AMP", True)', source)
@@ -179,8 +239,11 @@ class PrecisionDefaultTests(unittest.TestCase):
                 self.assertNotIn("torch.float16", source)
         launcher = (self.ROOT / "train.sh").read_text(encoding="utf-8")
         self.assertIn('export USE_AMP="${USE_AMP:-true}"', launcher)
-        dataset = (self.ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
-        self.assertNotIn("autocast", dataset)
+
+    def test_the_per_dataset_attack_runs_inside_autocast(self) -> None:
+        source = (self.ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
+        start = source.index("with autocast_context():\n                            if RANDOM_BASELINE:")
+        self.assertLess(start, source.index("attacker.optimize_universal("))
 
     def test_every_scope_disables_tf32(self) -> None:
         """PyTorch enables TF32 for convolutions by default, so it must be set."""
@@ -197,7 +260,7 @@ class PrecisionDefaultTests(unittest.TestCase):
                 self.assertIn('"allow_tf32": ALLOW_TF32,', source[start:end])
 
     def test_precision_is_part_of_the_reuse_key(self) -> None:
-        for runner in ("run_per_category.py", "run_per_image.py"):
+        for runner in ("run_per_dataset.py", "run_per_category.py", "run_per_image.py"):
             with self.subTest(runner=runner):
                 source = (self.ROOT / runner).read_text(encoding="utf-8")
                 self.assertIn(

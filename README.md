@@ -378,9 +378,8 @@ but no VisA image enters optimization. Per-category and per-image outputs use
   initial losses and loss reductions are measured from `delta=0` rather than
   from the random start, and a run that never beats "no attack" is reported as
   such instead of being credited with the random start's loss.
-- per_category and per_image run under bf16 autocast by default on
-  bf16-capable GPUs (`USE_AMP=false` forces fp32); per_dataset always runs in
-  fp32. Never fp16: sign-PGD reads `gradient.sign()`, so an underflowed fp16
+- Every scope runs under bf16 autocast by default on bf16-capable GPUs
+  (`USE_AMP=false` forces fp32). Never fp16: sign-PGD reads `gradient.sign()`, so an underflowed fp16
   gradient would silently zero part of the update, while bf16 has fp32's range.
   On GPUs without bf16 (e.g. T4) the attack falls back to fp32. TF32 is off
   everywhere (`ALLOW_TF32`; PyTorch enables it for convolutions unless told

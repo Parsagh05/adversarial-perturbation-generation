@@ -16,6 +16,7 @@ import random
 import shutil
 import subprocess
 import zipfile
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Dict
@@ -174,6 +175,22 @@ RANDOM_BASELINE = bool_env("RANDOM_BASELINE", False)
 # archive exists for shipping a bundle on its own. A pipeline that
 # evaluates in place pays for it and uses none of it.
 WRITE_BUNDLE_ARCHIVES = bool_env("WRITE_BUNDLE_ARCHIVES", True)
+# bf16 autocast by default on bf16-capable GPUs, as in the other scopes;
+# USE_AMP=false forces fp32. Never fp16: sign-PGD consumes only
+# gradient.sign(), so an fp16 gradient that underflows silently zeroes part of
+# the update. bf16 has fp32's range; GPUs without it fall back to fp32.
+USE_AMP = bool_env("USE_AMP", True)
+AMP_DTYPE_NAME = "bfloat16" if torch.cuda.is_bf16_supported() else "disabled_no_bf16"
+AMP_ENABLED = USE_AMP and AMP_DTYPE_NAME == "bfloat16"
+
+
+def autocast_context():
+    return (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True)
+        if AMP_ENABLED else nullcontext()
+    )
+
+
 TRAIN_FRACTIONS = parse_fraction_list(
     os.environ.get("PER_DATASET_ATTACK_TRAIN_FRACTIONS", "1.0"),
     name="PER_DATASET_ATTACK_TRAIN_FRACTIONS",
@@ -245,6 +262,7 @@ CLIP_CACHE.mkdir(parents=True, exist_ok=True)
 os.environ["ANOMALYCLIP_CLIP_CACHE"] = str(CLIP_CACHE)
 
 print("GPU:", torch.cuda.get_device_name(0))
+print("Autocast:", AMP_DTYPE_NAME if AMP_ENABLED else "disabled; fp32 sign-PGD")
 print("Protocol SHA256:", split_sha256())
 print("Attack-train fractions:", TRAIN_FRACTIONS)
 print("Loss formulation:", LOSS_FORMULATION)
@@ -367,15 +385,16 @@ def write_snapshot_artifact(
         root=root,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    final_losses = attacker._diagnostic_losses(
-        source_train, image_loader, captured, target_label, loss_mode,
-        mask_loader=(
-            mask_loader
-            if LOSS_FORMULATION == "ce_focal_dice"
-            and loss_mode in {"local", "combined"}
-            else None
-        ),
-    )
+    with autocast_context():
+        final_losses = attacker._diagnostic_losses(
+            source_train, image_loader, captured, target_label, loss_mode,
+            mask_loader=(
+                mask_loader
+                if LOSS_FORMULATION == "ce_focal_dice"
+                and loss_mode in {"local", "combined"}
+                else None
+            ),
+        )
     snapshot_metadata = {
         **metadata,
         "optimization_epochs": snapshot_epochs,
@@ -581,6 +600,8 @@ for source_dataset in SOURCE_DATASETS:
                     expected = {
                         "format_version": "canonical_clip_per_dataset_segmentation_loss_v2",
                         "allow_tf32": ALLOW_TF32,
+                        # Precision changes the delta, so a bf16 delta is never reused as fp32.
+                        "autocast_dtype": AMP_DTYPE_NAME if AMP_ENABLED else "float32",
                         # Only the control records it, so the optimised deltas
                         # already on disk stay reusable; see reusable().
                         **({"delta_source": "random_rademacher"} if RANDOM_BASELINE else {}),
@@ -678,27 +699,28 @@ for source_dataset in SOURCE_DATASETS:
                             and loss_mode in {"local", "combined"}
                             else None
                         )
-                        if RANDOM_BASELINE:
-                            result = attacker.random_universal(
-                                source_train,
-                                image_loader,
-                                target_label,
-                                loss_mode,
-                                seed=run_seed,
-                                mask_loader=condition_mask_loader,
-                                diagnostic_samples=source_train,
-                            )
-                        else:
-                            result = attacker.optimize_universal(
-                                source_train,
-                                image_loader,
-                                target_label,
-                                loss_mode,
-                                mask_loader=condition_mask_loader,
-                                diagnostic_samples=source_train,
-                                progress=progress,
-                                snapshot_steps=tuple(snapshot_budgets),
-                            )
+                        with autocast_context():
+                            if RANDOM_BASELINE:
+                                result = attacker.random_universal(
+                                    source_train,
+                                    image_loader,
+                                    target_label,
+                                    loss_mode,
+                                    seed=run_seed,
+                                    mask_loader=condition_mask_loader,
+                                    diagnostic_samples=source_train,
+                                )
+                            else:
+                                result = attacker.optimize_universal(
+                                    source_train,
+                                    image_loader,
+                                    target_label,
+                                    loss_mode,
+                                    mask_loader=condition_mask_loader,
+                                    diagnostic_samples=source_train,
+                                    progress=progress,
+                                    snapshot_steps=tuple(snapshot_budgets),
+                                )
                         bar.close()
                         delta = result.delta.detach().cpu().float()
                         actual_linf = float(delta.abs().max())
