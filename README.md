@@ -263,8 +263,10 @@ image it attacks has no sharing to balance, so hinging would only stop it
 early. That is also why per-image attack literature such as AutoAttack
 ([arXiv:2003.01690](https://arxiv.org/abs/2003.01690)) does not do this.
 
-**Choosing a value.** `D` is in margin units, so read it off a completed run of
-the same setup rather than guessing. `MARGIN_HINGE_DISPLACEMENT=0` reproduces
+**Choosing a value.** `D` is in margin units, and the margin is a plain cosine
+difference (no temperature), so read it off a completed run of the same setup
+rather than guessing. Runs before this change measured the margin divided by
+0.07, so an old `D` corresponds to `D × 0.07` today (0.5 then ≈ 0.035 now). `MARGIN_HINGE_DISPLACEMENT=0` reproduces
 CD-UAP's hinge relative to the clean margin, stopping each image the moment it
 improves at all. Larger values push further before saturating.
 

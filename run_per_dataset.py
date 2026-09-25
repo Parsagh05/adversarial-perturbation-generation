@@ -449,6 +449,7 @@ attack_config = AttackConfig(
     # that condition's own training-set size.
     universal_steps=1,
     random_start=True,
+    # Softmax temperature for ce_focal_dice only; margin_topk ignores it.
     temperature=0.07,
     global_weight=0.2,
     local_weight=0.8,

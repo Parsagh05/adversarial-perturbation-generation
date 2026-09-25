@@ -90,6 +90,13 @@ class TargetedPGD:
         # not the unbiased minibatch estimate a stochastic universal attack
         # assumes (Shafahi et al. 1811.11304 Alg. 2; CD-UAP 2010.03300 Alg. 1).
         batch_size = len(categories)
+        # margin_topk is a plain cosine difference. A temperature would only
+        # rescale it, which sign-PGD cannot see: sign(c * g) = sign(g). Only
+        # the softmax of ce_focal_dice needs one.
+        temperature = (
+            1.0 if self.config.loss_formulation == "margin_topk"
+            else self.config.temperature
+        )
         total_global = global_features.new_zeros(())
         total_local = global_features.new_zeros(())
         total_local_focal = global_features.new_zeros(())
@@ -118,7 +125,7 @@ class TargetedPGD:
                 global_logits = ensemble_class_logits(
                     global_features.index_select(0, index_tensor),
                     bank,
-                    self.config.temperature,
+                    temperature,
                 )
                 if self.config.loss_formulation == "margin_topk":
                     global_margin = global_logits[:, 1] - global_logits[:, 0]
@@ -146,7 +153,7 @@ class TargetedPGD:
                     if selected.shape[1] > 1:
                         selected = selected[:, 1:, :]
                     local_logits = ensemble_class_logits(
-                        selected, bank, self.config.temperature
+                        selected, bank, temperature
                     )
                     token_count = selected.shape[1]
                     if self.config.loss_formulation == "margin_topk":

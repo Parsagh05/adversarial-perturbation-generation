@@ -126,6 +126,33 @@ class MarginTopKLossTests(unittest.TestCase):
         settings.update(overrides)
         return TargetedPGD(_FakeSurrogate(), AttackConfig(**settings))
 
+    def test_the_margin_ignores_the_temperature(self) -> None:
+        """A cosine difference, whatever temperature the config carries."""
+
+        global_features = torch.tensor([[0.3, 0.9], [0.8, 0.1]])
+        patch_features = [torch.tensor([
+            [[0.0, 0.0], [0.2, 0.7], [0.9, 0.1]],
+            [[0.0, 0.0], [0.5, 0.5], [0.1, 0.8]],
+        ])]
+        losses = {}
+        for temperature in (0.07, 1.0):
+            attacker = self._attacker(temperature=temperature)
+            losses[temperature] = attacker._group_losses(
+                global_features, patch_features, ["object", "object"], 1, "combined",
+            )
+        for key in ("total", "global_margin", "local_topk"):
+            with self.subTest(key=key):
+                self.assertTrue(torch.equal(losses[0.07][key], losses[1.0][key]))
+
+    def test_cross_entropy_still_uses_the_temperature(self) -> None:
+        global_features = torch.tensor([[0.3, 0.9]])
+        values = [
+            self._attacker(temperature=t, loss_formulation="ce_focal_dice")
+            ._group_losses(global_features, [], ["object"], 1, "global")["total"]
+            for t in (0.07, 1.0)
+        ]
+        self.assertFalse(torch.equal(values[0], values[1]))
+
     def test_direction_sign_maximizes_for_normal_and_minimizes_for_anomalous(
         self,
     ) -> None:
