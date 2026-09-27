@@ -157,6 +157,10 @@ PER_CROSS_EPOCHS = float(
 
 
 UNIVERSAL_BATCH_SIZE = int(os.environ.get("PER_DATASET_BATCH_SIZE", "1"))
+# pgd only: gradient accumulation over chunks of this many images, the same
+# update as the whole batch in less memory. 0 = off. Execution, not a
+# hyperparameter (common.EXECUTION_SETTINGS), so it never changes a setup.
+MICRO_BATCH_SIZE = int(os.environ.get("PER_DATASET_MICRO_BATCH_SIZE", "0"))
 LOCAL_FOCAL_WEIGHT = float(os.environ.get("LOCAL_FOCAL_WEIGHT", "0.5"))
 LOCAL_DICE_WEIGHT = float(os.environ.get("LOCAL_DICE_WEIGHT", "0.5"))
 LOCAL_FOCAL_GAMMA = float(os.environ.get("LOCAL_FOCAL_GAMMA", "2.0"))
@@ -750,6 +754,7 @@ for source_dataset in SOURCE_DATASETS:
                                     diagnostic_samples=source_train,
                                     progress=progress,
                                     snapshot_steps=tuple(snapshot_budgets),
+                                    micro_batch_size=MICRO_BATCH_SIZE,
                                 )
                         bar.close()
                         delta = result.delta.detach().cpu().float()

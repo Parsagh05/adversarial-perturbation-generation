@@ -663,8 +663,14 @@ class TargetedPGD:
         diagnostic_samples: Optional[Sequence[object]] = None,
         progress: Callable[[int, int, Dict[str, float]], None] | None = None,
         snapshot_steps: Sequence[int] = (),
+        micro_batch_size: int = 0,
     ) -> UniversalAttackResult:
         """Optimize one shared perturbation across the supplied samples.
+
+        ``micro_batch_size`` (pgd only; 0 = off) splits each batch into chunks
+        whose gradients are accumulated before the single sign step. The loss is
+        a mean of independent per-image terms, so the gradient is the batch's
+        own up to rounding; only the memory differs.
 
         ``snapshot_steps`` captures, at each listed step, the delta this run
         would have returned had it been configured to stop there. That is only
@@ -829,6 +835,24 @@ class TargetedPGD:
                 pre_update_loss = weighted_loss / (
                     len(batch_samples) * self.config.sga_inner_passes
                 )
+            elif 0 < micro_batch_size < len(batch_samples):
+                # Gradient accumulation: each chunk's loss is a mean over its
+                # rows, so weighting it by its share of the batch makes the sum
+                # the batch-mean gradient. delta stays fixed across the chunks.
+                gradient = torch.zeros_like(delta)
+                global_gradient = torch.zeros_like(delta) if mode != "local" else None
+                local_gradient = torch.zeros_like(delta) if mode != "global" else None
+                pre_update_loss = 0.0
+                for start in range(0, len(batch_samples), micro_batch_size):
+                    positions = list(range(start, min(start + micro_batch_size, len(batch_samples))))
+                    weight = len(positions) / len(batch_samples)
+                    part, part_global, part_local, loss = batch_gradient(delta, positions)
+                    gradient = gradient + weight * part
+                    if global_gradient is not None:
+                        global_gradient = global_gradient + weight * part_global
+                    if local_gradient is not None:
+                        local_gradient = local_gradient + weight * part_local
+                    pre_update_loss += weight * loss
             else:
                 gradient, global_gradient, local_gradient, pre_update_loss = (
                     batch_gradient(delta, list(range(len(batch_samples))))
