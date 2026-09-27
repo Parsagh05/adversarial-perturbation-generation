@@ -405,6 +405,10 @@ def audit_scope(
         )
         if SMOKE:
             print(f"SMOKE NOTE: {message}; expected with very few test steps.")
+        elif RANDOM_BASELINE:
+            # A random-sign control is never optimised: its loss is not meant
+            # to fall, so the convergence check does not apply.
+            print(f"RANDOM BASELINE NOTE: {message}; expected, nothing is optimised.")
         else:
             raise RuntimeError(message)
 
