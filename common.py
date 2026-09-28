@@ -570,6 +570,10 @@ _NOT_SETTINGS = frozenset({
     "REPO_COMMIT", "ANOMALYCLIP_COMMIT",
     "GENERATOR_SCRIPT_SHA256", "ATTACK_CODE_SHA256",
     "IMAGE_CACHE", "MASK_CACHE", "BUNDLE_SCOPES",
+    # Where this run writes its snapshots: paths in the run that makes them
+    # (not recordable) but [] when a snapshot is replayed, so comparing it
+    # refused every replay. The budgets are in execution.snapshot_epochs.
+    "SNAPSHOT_TARGETS",
 })
 # Knobs that change how a run executes but not the deltas it produces, so a
 # resume may change them: micro-batching is exact by construction and is tuned
