@@ -25,6 +25,7 @@ def _payload(
     attack_train_fraction: float | None = 1.0,
     seed: int = 111,
     epoch: int = 15,
+    feature_layers: list[int] | None = [24],
 ) -> dict:
     prompt_config = {
         "n_ctx": 12,
@@ -39,6 +40,9 @@ def _payload(
         prompt_config["split_protocol"] = split_protocol
     if attack_train_fraction is not None:
         prompt_config["attack_train_fraction"] = attack_train_fraction
+    # None: written before the training pipeline recorded its layers.
+    if feature_layers is not None:
+        prompt_config["feature_layers"] = feature_layers
     return {
         "schema_version": 1,
         "dataset": dataset,
@@ -109,6 +113,16 @@ class CheckpointMismatchTests(unittest.TestCase):
     def test_dataset_mismatch_is_reported(self):
         reason = checkpoint_mismatch(_payload(dataset="visa"), **REQUIRED)
         self.assertIn("visa", reason)
+
+    def test_four_layer_checkpoint_is_rejected(self):
+        reason = checkpoint_mismatch(_payload(feature_layers=[6, 12, 18, 24]), **REQUIRED)
+        self.assertIn("layers", reason)
+
+    def test_checkpoint_without_recorded_layers_counts_as_four_layer(self):
+        reason = checkpoint_mismatch(_payload(feature_layers=None), **REQUIRED)
+        self.assertIn("[6, 12, 18, 24]", reason)
+        required = {**REQUIRED, "feature_layers": (6, 12, 18, 24)}
+        self.assertEqual(checkpoint_mismatch(_payload(feature_layers=None), **required), "")
 
     def test_legacy_checkpoint_counts_as_balanced_at_full_fraction(self):
         legacy = _payload(split_protocol=None, attack_train_fraction=None)
@@ -239,6 +253,35 @@ class EnsureTests(_EnsureCase):
             with mock.patch.object(ensure_module, "train_prompts", fake_train):
                 with self.assertRaises(RuntimeError):
                     self.run_ensure()
+
+
+class FeatureLayerTests(_EnsureCase):
+    def test_four_layer_checkpoint_is_retrained_on_layer_24(self):
+        self.write(self.derived(), _payload(feature_layers=[6, 12, 18, 24]))
+        captured = {}
+
+        def fake_train(repo_root, config_path, dataset):
+            captured["model"] = json.loads(Path(config_path).read_text(encoding="utf-8"))["model"]
+            self.write(self.derived(), _payload())
+
+        with mock.patch.object(ensure_module, "resolve_training_repo") as repo:
+            repo.return_value = self.root / "repo"
+            with mock.patch.object(ensure_module, "train_prompts", fake_train):
+                self.assertEqual(self.run_ensure(), self.derived())
+        self.assertEqual(captured["model"]["feature_layers"], [24])
+        self.assertEqual(captured["model"]["feature_map_indices"], [0])
+
+    def test_layers_can_be_overridden(self):
+        expected = self.write(self.derived(), _payload(feature_layers=[6, 12, 18, 24]))
+        with mock.patch.object(ensure_module, "train_prompts") as trainer:
+            self.assertEqual(
+                self.run_ensure(PROMPT_TRAINING_FEATURE_LAYERS="6,12,18,24"), expected
+            )
+        trainer.assert_not_called()
+
+    def test_invalid_layer_setting_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.run_ensure(PROMPT_TRAINING_FEATURE_LAYERS="24,24")
 
 
 class SearchRootTests(_EnsureCase):

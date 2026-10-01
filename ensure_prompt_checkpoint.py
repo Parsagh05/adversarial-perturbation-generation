@@ -25,7 +25,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import torch
 
@@ -36,6 +36,14 @@ from setup_catalog import _fraction_tag
 # runs over the complete cohort.
 LEGACY_PROTOCOL = "balanced"
 LEGACY_FRACTION = 1.0
+# Checkpoints written before the training pipeline recorded its visual layers
+# were all fitted on CLIP layers 6/12/18/24.
+LEGACY_FEATURE_LAYERS = (6, 12, 18, 24)
+# The layers prompts must be fitted on. Layer 24 alone shares the final-layer
+# space of the CLS token the image score uses; 6/12/18/24 left the image-level
+# AUROC at 30 (MVTec) / 56 (VisA) against 77 / 84 for layer 24. The surrogate
+# reads layer 24 too. PROMPT_TRAINING_FEATURE_LAYERS overrides, e.g. "6,12,18,24".
+DEFAULT_FEATURE_LAYERS = (24,)
 PLACEHOLDER_PREFIX = "/ABSOLUTE/PATH/TO/"
 
 
@@ -83,6 +91,16 @@ def checkpoint_path(
     return output_root / cohort / dataset / f"prompts_epoch{epochs}.pt"
 
 
+def required_feature_layers() -> tuple[int, ...]:
+    raw = os.environ.get("PROMPT_TRAINING_FEATURE_LAYERS", "").strip()
+    if not raw:
+        return DEFAULT_FEATURE_LAYERS
+    layers = tuple(int(part) for part in raw.split(",") if part.strip())
+    if not layers or any(layer <= 0 for layer in layers) or len(set(layers)) != len(layers):
+        raise ValueError(f"PROMPT_TRAINING_FEATURE_LAYERS must list distinct positive layers: {raw!r}")
+    return layers
+
+
 def search_roots() -> list[Path]:
     """Read-only prompt trees to look in before the writable output root.
 
@@ -123,6 +141,7 @@ def checkpoint_mismatch(
     attack_train_fraction: float,
     seed: int,
     epochs: int,
+    feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
 ) -> str:
     """Return why this checkpoint does not describe the requested run, or ""."""
 
@@ -155,6 +174,13 @@ def checkpoint_mismatch(
     found_epoch = int(payload.get("epoch", -1))
     if found_epoch != int(epochs):
         return f"trained {found_epoch} epochs, this run asks for {int(epochs)}"
+
+    found_layers = tuple(int(layer) for layer in prompt_config.get("feature_layers", LEGACY_FEATURE_LAYERS))
+    if found_layers != tuple(int(layer) for layer in feature_layers):
+        return (
+            f"fitted on CLIP layers {list(found_layers)}, this run needs "
+            f"{[int(layer) for layer in feature_layers]}"
+        )
 
     return ""
 
@@ -208,6 +234,7 @@ def write_training_config(
     batch_size: int,
     output_root: Path,
     work_dir: Path,
+    feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
 ) -> Path:
     """Emit the resolved training config for exactly this run's split.
 
@@ -245,6 +272,10 @@ def write_training_config(
             "anomalyclip_root": str(work_dir / "AnomalyCLIP"),
             "clip_download_root": str(work_dir / "clip_cache"),
             "device": os.environ.get("PROMPT_TRAINING_DEVICE", "auto"),
+            # Set explicitly so the checkpoint never depends on the training
+            # repository's own default.
+            "feature_layers": [int(layer) for layer in feature_layers],
+            "feature_map_indices": list(range(len(feature_layers))),
         },
         # Only settings that survived the match check reach training, so
         # anything already in the target directory describes a run this one
@@ -290,6 +321,7 @@ def ensure(dataset: str) -> Path:
     output_root = Path(os.environ["PROMPT_TRAINING_OUTPUT_ROOT"]).expanduser().resolve()
     work_dir = Path(os.environ["WORK_DIR"]).expanduser().resolve()
     manifest = Path(os.environ["ATTACK_TRAIN_CSV"]).expanduser().resolve()
+    feature_layers = required_feature_layers()
 
     requirements = {
         "dataset": dataset,
@@ -297,6 +329,7 @@ def ensure(dataset: str) -> Path:
         "attack_train_fraction": attack_train_fraction,
         "seed": seed,
         "epochs": epochs,
+        "feature_layers": feature_layers,
     }
     # Training writes here and nowhere else, because the published prompts are
     # mounted read-only. A published checkpoint that does not describe this run
@@ -337,7 +370,7 @@ def ensure(dataset: str) -> Path:
     log(
         f"[{dataset}] training prompts: protocol={split_protocol} "
         f"fraction={attack_train_fraction:g} seed={seed} epochs={epochs} "
-        f"batch={batch_size}"
+        f"batch={batch_size} layers={list(feature_layers)}"
     )
     repo_root = resolve_training_repo(work_dir)
     config_path = write_training_config(
@@ -352,6 +385,7 @@ def ensure(dataset: str) -> Path:
         batch_size=batch_size,
         output_root=output_root,
         work_dir=work_dir,
+        feature_layers=feature_layers,
     )
     train_prompts(repo_root, config_path, dataset)
 
