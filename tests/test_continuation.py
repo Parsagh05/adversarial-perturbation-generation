@@ -24,7 +24,8 @@ def _matcher(continue_from: Path):
             and any(getattr(target, "id", "") == "CONTINUATION_IGNORED" for target in node.targets)
         )
     ]
-    namespace = {"torch": torch, "Path": Path, "Dict": dict, "CONTINUE_FROM": str(continue_from)}
+    namespace = {"torch": torch, "Path": Path, "Dict": dict,
+                 "CONTINUATION_ROOTS": [Path(continue_from).resolve()]}
     exec(compile(ast.Module(body=wanted, type_ignores=[]), "run_per_dataset.py", "exec"), namespace)
     return namespace["continuation_source"]
 

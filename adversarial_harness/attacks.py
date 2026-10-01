@@ -27,6 +27,9 @@ class UniversalAttackResult:
     selected_diagnostic_loss: float
     # step -> the delta this run would have returned had it stopped there.
     snapshots: Dict[int, torch.Tensor] = field(default_factory=dict)
+    # Set when should_stop ended the run early: the number of steps taken.
+    # ``delta`` is then the iterate at that point, to be continued later.
+    stopped_at_step: Optional[int] = None
 
 
 def scatter_rows(
@@ -666,6 +669,7 @@ class TargetedPGD:
         micro_batch_size: int = 0,
         initial_delta: Optional[torch.Tensor] = None,
         start_step: int = 0,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> UniversalAttackResult:
         """Optimize one shared perturbation across the supplied samples.
 
@@ -687,13 +691,18 @@ class TargetedPGD:
         That needs everything else the trajectory carries to be recoverable from
         the delta alone: no momentum, a constant step, and the final iterate.
         The history and snapshots cover the continued steps only.
+
+        ``should_stop`` is asked before every step; when it answers True the
+        run returns at once with ``stopped_at_step`` set and the current
+        iterate as ``delta`` (no final diagnostics), ready to be continued from
+        that step. It needs the same settings a continuation does.
         """
 
-        if start_step:
-            if not 0 < start_step < self.config.universal_steps or initial_delta is None:
-                raise ValueError(
-                    "start_step must lie inside the budget and needs initial_delta"
-                )
+        if start_step and (
+            not 0 < start_step < self.config.universal_steps or initial_delta is None
+        ):
+            raise ValueError("start_step must lie inside the budget and needs initial_delta")
+        if start_step or should_stop is not None:
             if (
                 self.config.momentum_decay > 0.0
                 or self.config.step_size_schedule != "constant"
@@ -779,6 +788,18 @@ class TargetedPGD:
                 )
 
         for step in range(start_step, self.config.universal_steps):
+            if should_stop is not None and should_stop():
+                return UniversalAttackResult(
+                    delta=delta.detach(),
+                    history=history,
+                    initial_losses=initial_losses,
+                    final_losses={},
+                    diagnostic_sample_ids=diagnostic_ids,
+                    selected_step=step,
+                    selected_diagnostic_loss=float("nan"),
+                    snapshots=snapshots,
+                    stopped_at_step=step,
+                )
             indices = next_indices()
             batch_samples = [samples[int(index)] for index in indices]
             clean = torch.stack([image_loader(sample) for sample in batch_samples]).to(

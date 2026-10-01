@@ -923,7 +923,8 @@ class _PixelwiseFakeSurrogate(_FakeSurrogate):
 class ContinuationEquivalenceTests(unittest.TestCase):
     """Continuing from a shorter run's delta must equal the uninterrupted run."""
 
-    def _run(self, steps, optimizer="pgd", start=None, **overrides):
+    def _run(self, steps, optimizer="pgd", start=None, should_stop=None, snapshot_steps=(),
+             **overrides):
         torch.manual_seed(1234)
         config = dict(
             temperature=1.0,
@@ -950,7 +951,30 @@ class ContinuationEquivalenceTests(unittest.TestCase):
             mode="global",
             initial_delta=None if start is None else start[1],
             start_step=0 if start is None else start[0],
+            should_stop=should_stop,
+            snapshot_steps=snapshot_steps,
         )
+
+    def test_a_run_stopped_early_continues_to_the_uninterrupted_run(self) -> None:
+        for optimizer in ("pgd", "sga"):
+            with self.subTest(optimizer=optimizer):
+                calls = []
+
+                def stop_at_five():
+                    calls.append(None)
+                    return len(calls) > 5  # asked before each step: stop before step 6
+
+                full = self._run(12, optimizer, snapshot_steps=(3,))
+                stopped = self._run(12, optimizer, should_stop=stop_at_five, snapshot_steps=(3,))
+                self.assertEqual(stopped.stopped_at_step, 5)
+                self.assertEqual(len(stopped.history), 5)
+                self.assertIsNone(full.stopped_at_step)
+                # A snapshot reached before the stop is kept.
+                self.assertEqual(
+                    _delta_sha256(stopped.snapshots[3]), _delta_sha256(full.snapshots[3])
+                )
+                continued = self._run(12, optimizer, start=(5, stopped.delta))
+                self.assertEqual(_delta_sha256(full.delta), _delta_sha256(continued.delta))
 
     def test_a_continued_run_equals_the_uninterrupted_run(self) -> None:
         # 5 images at batch 2 make a short final batch, so the replay has to

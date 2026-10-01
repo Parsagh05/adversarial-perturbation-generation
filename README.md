@@ -930,7 +930,20 @@ else the trajectory carries to be recoverable from the delta alone, so it is
 refused with momentum on, a decaying step size or `CHECKPOINT_SELECTION=best`.
 Snapshots work as usual for budgets past the starting point. `per_dataset` and
 `cross_dataset` only; `run_per_category.py` and `run_per_image.py` refuse to
-start with it set.
+start with it set. `CONTINUE_REQUIRED=true` stops with an error instead of
+training a delta from scratch when nothing matches.
+
+### Sessions with a time limit
+
+`GENERATION_DEADLINE` (a Unix time) with `GENERATION_CHECKPOINT_DIR` splits one
+run across sessions. Before each step the run checks whether the step would
+end past the deadline; if so it saves the delta in progress to the checkpoint
+folder - in float32, with any snapshots it has already passed - writes
+`DEADLINE_REACHED.json` there and exits with code 75. No new delta is started
+in the last ten minutes. The checkpoint folder is always searched like
+`CONTINUE_FROM`, so running again with the same folder, and the finished deltas
+restored, continues each delta from the step it reached; the result is
+byte-identical to an uninterrupted run (tested).
 
 ## Outputs
 

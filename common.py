@@ -582,8 +582,10 @@ EXECUTION_SETTINGS = frozenset({
     "OVERWRITE_EXISTING", "WRITE_BUNDLE_ARCHIVES", "CACHE_INPUTS_IN_RAM",
     "MICRO_BATCH_SIZE", "AUTO_REDUCE_MICRO_BATCH_ON_OOM",
     # Where a continued run started from; each delta records it as
-    # continued_from.
-    "CONTINUE_FROM",
+    # continued_from. The deadline and its checkpoints only split one run
+    # across sessions.
+    "CONTINUE_FROM", "CONTINUE_REQUIRED", "GENERATION_DEADLINE",
+    "GENERATION_CHECKPOINT_DIR", "DEADLINE_EXIT_CODE", "DEADLINE_START_MARGIN_SECONDS",
 })
 # Read through an f-string in adversarial_harness/prompts.py, so the source
 # scan below cannot see them.

@@ -177,6 +177,17 @@ SNAPSHOT_EPOCHS="${SNAPSHOT_EPOCHS:-}"
 # only with momentum off, a constant step size and final checkpoint selection.
 #   CONTINUE_FROM=/runs/pgd_b64_mb8_ep20/ep20/setups FINAL_EPOCHS=40
 CONTINUE_FROM="${CONTINUE_FROM:-}"
+# true: stop with an error instead of training a delta from scratch when
+# CONTINUE_FROM holds no matching shorter run of it.
+CONTINUE_REQUIRED="${CONTINUE_REQUIRED:-false}"
+
+# Sessions with a hard time limit (Kaggle): at GENERATION_DEADLINE (a Unix
+# time) the delta in progress is saved to GENERATION_CHECKPOINT_DIR and the run
+# exits with code 75. Run again with the same folder and it continues each
+# delta from the step it reached, exactly. per_dataset only, with the same
+# settings CONTINUE_FROM needs.
+GENERATION_DEADLINE="${GENERATION_DEADLINE:-}"
+GENERATION_CHECKPOINT_DIR="${GENERATION_CHECKPOINT_DIR:-}"
 MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL="${MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL:-0.20}"
 MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL="${MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL:-0.40}"
 

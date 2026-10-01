@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import json
 import math
 import os
 import random
 import shutil
 import subprocess
+import sys
+import time
 import zipfile
 from contextlib import nullcontext
 from dataclasses import replace
@@ -191,6 +194,26 @@ if CONTINUE_FROM:
         raise SystemExit("RANDOM_BASELINE has no optimisation to continue; unset CONTINUE_FROM")
     if not Path(CONTINUE_FROM).expanduser().is_dir():
         raise FileNotFoundError(f"CONTINUE_FROM is not a folder: {CONTINUE_FROM}")
+# Stop cleanly at this Unix time, for sessions with a hard limit: the delta in
+# progress is saved to GENERATION_CHECKPOINT_DIR and the run exits with
+# DEADLINE_EXIT_CODE. That folder is always searched like CONTINUE_FROM, so the
+# next run picks the delta up at the step it reached.
+GENERATION_DEADLINE = float(os.environ.get("GENERATION_DEADLINE", "").strip() or 0) or None
+GENERATION_CHECKPOINT_DIR = os.environ.get("GENERATION_CHECKPOINT_DIR", "").strip()
+DEADLINE_EXIT_CODE = 75
+# Starting a delta costs a full pass over its cohort before the first step, so
+# none is started this close to the deadline.
+DEADLINE_START_MARGIN_SECONDS = 600
+# Refuse to train a delta from scratch when no earlier run of it is found.
+CONTINUE_REQUIRED = bool_env("CONTINUE_REQUIRED", False)
+if GENERATION_DEADLINE and not GENERATION_CHECKPOINT_DIR:
+    raise SystemExit("GENERATION_DEADLINE needs GENERATION_CHECKPOINT_DIR")
+if GENERATION_DEADLINE and RANDOM_BASELINE:
+    raise SystemExit("RANDOM_BASELINE has nothing to checkpoint; unset GENERATION_DEADLINE")
+CONTINUATION_ROOTS = [
+    Path(root).expanduser().resolve()
+    for root in (CONTINUE_FROM, GENERATION_CHECKPOINT_DIR) if root
+]
 # What actually ran, recorded in generation_config.json. The random baseline
 # never optimises, so it ignores OPTIMIZER.
 OPTIMIZER_USED = (
@@ -469,12 +492,17 @@ CONTINUATION_IGNORED = frozenset({
 def continuation_source(pt_name: str, expected: Dict):
     """``(steps, path, payload)`` of the longest shorter run of this delta.
 
-    Searched for under CONTINUE_FROM by file name, then matched on the
-    recorded settings, so the folder layout and setup ID do not matter.
+    Searched for under CONTINUE_FROM and GENERATION_CHECKPOINT_DIR by file
+    name, then matched on the recorded settings, so the folder layout and
+    setup ID do not matter.
     """
 
     best, rejected = None, []
-    for path in sorted(Path(CONTINUE_FROM).expanduser().resolve().rglob(pt_name)):
+    paths = [
+        path for root in CONTINUATION_ROOTS if root.is_dir()
+        for path in sorted(root.rglob(pt_name))
+    ]
+    for path in paths:
         payload = torch.load(path, map_location="cpu", weights_only=False)
         metadata = payload.get("metadata", {})
         steps = int(metadata.get("universal_steps", 0))
@@ -497,6 +525,48 @@ def continuation_source(pt_name: str, expected: Dict):
         for path, differing in rejected[:3]:
             print(f"[continue] not used, settings differ ({', '.join(differing)}): {path}")
     return best
+
+
+def stop_at_deadline(message: str) -> None:
+    """Record why the run stopped and exit with DEADLINE_EXIT_CODE."""
+
+    marker = Path(GENERATION_CHECKPOINT_DIR) / "DEADLINE_REACHED.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    record = dict(setup_id=SETUP_ID, message=message, unix_time=time.time())
+    marker.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    print(f"[deadline] {message}", flush=True)
+    sys.exit(DEADLINE_EXIT_CODE)
+
+
+def deadline_check():
+    """should_stop for one optimisation: stop before a step that would end
+    past GENERATION_DEADLINE, judged by the longest of the recent steps."""
+
+    calls, recent = [], []
+
+    def should_stop() -> bool:
+        now = time.time()
+        if calls:
+            recent.append(now - calls[-1])
+            del recent[:-10]
+        calls.append(now)
+        return now + 1.2 * max(recent, default=0.0) >= GENERATION_DEADLINE
+
+    return should_stop
+
+
+def write_checkpoint(path: Path, delta, snapshots, metadata) -> None:
+    """Write a partial delta atomically: a kill mid-write leaves the old one."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    torch.save({
+        # float32, unlike finished deltas, so the continuation is exact.
+        "delta": delta.detach().cpu().float(),
+        "snapshots": {int(step): value.detach().cpu().float() for step, value in snapshots.items()},
+        "metadata": metadata,
+    }, temporary)
+    os.replace(temporary, path)
 
 
 def reusable(pt_path: Path, expected: Dict) -> bool:
@@ -761,9 +831,16 @@ for source_dataset in SOURCE_DATASETS:
                             f"[generate] source={source_dataset} fraction={fraction:.2f} "
                             f"direction={direction} loss={loss_mode} train={len(source_train)}"
                         )
+                        if (
+                            GENERATION_DEADLINE
+                            and time.time() > GENERATION_DEADLINE - DEADLINE_START_MARGIN_SECONDS
+                        ):
+                            stop_at_deadline(
+                                f"too close to the deadline to start {condition_key}/{loss_mode}"
+                            )
                         continuation = (
                             continuation_source(pt_path.name, expected)
-                            if CONTINUE_FROM else None
+                            if CONTINUATION_ROOTS else None
                         )
                         start_step = continuation[0] if continuation else 0
                         if continuation:
@@ -772,8 +849,20 @@ for source_dataset in SOURCE_DATASETS:
                                 f"({continuation[2]['metadata']['optimization_epochs']} epochs): "
                                 f"{continuation[1]}"
                             )
+                        elif CONTINUE_REQUIRED:
+                            raise SystemExit(
+                                f"CONTINUE_REQUIRED: no earlier run of {condition_key}/{loss_mode} "
+                                "matches; see the [continue] lines above"
+                            )
                         elif CONTINUE_FROM:
                             print("[continue] no shorter run of this delta found; training from scratch")
+                        # Snapshots an interrupted run already passed, carried in its checkpoint.
+                        carried_snapshots = {
+                            int(step): value.to("cuda")
+                            for step, value in (
+                                continuation[2].get("snapshots", {}) if continuation else {}
+                            ).items()
+                        }
                         run_seed = condition_seed(SEED, source_dataset, fraction, direction, loss_mode)
                         seed_everything(run_seed)
                         attacker = TargetedPGD(surrogate, condition_config)
@@ -825,8 +914,37 @@ for source_dataset in SOURCE_DATASETS:
                                         if continuation else None
                                     ),
                                     start_step=start_step,
+                                    should_stop=(
+                                        deadline_check() if GENERATION_DEADLINE else None
+                                    ),
                                 )
                         bar.close()
+                        prior_history = (
+                            continuation[2]["metadata"].get("optimization_history", [])
+                            if continuation else []
+                        )
+                        snapshots = {**carried_snapshots, **result.snapshots}
+                        if result.stopped_at_step is not None:
+                            reached = result.stopped_at_step
+                            checkpoint = artifact_path(
+                                source_dataset, fraction, direction, loss_mode, partition_key,
+                                root=Path(GENERATION_CHECKPOINT_DIR) / SETUP_ID / PROMPT_MODE,
+                            )
+                            write_checkpoint(checkpoint, result.delta, snapshots, {
+                                **expected,
+                                "universal_steps": reached,
+                                "optimization_epochs": condition_epochs * reached / condition_steps,
+                                "checkpoint_of": {
+                                    "universal_steps": condition_steps,
+                                    "optimization_epochs": condition_epochs,
+                                },
+                                "run_seed": run_seed,
+                                "optimization_history": prior_history + result.history,
+                            })
+                            stop_at_deadline(
+                                f"{condition_key}/{loss_mode} stopped at step "
+                                f"{reached}/{condition_steps}; checkpoint {checkpoint}"
+                            )
                         delta = result.delta.detach().cpu().float()
                         actual_linf = float(delta.abs().max())
                         if actual_linf > EPSILON + 1e-6:
@@ -878,10 +996,7 @@ for source_dataset in SOURCE_DATASETS:
                             },
                             # A continuation's own history starts after the
                             # steps it took over; prepend theirs.
-                            "optimization_history": (
-                                continuation[2]["metadata"].get("optimization_history", [])
-                                if continuation else []
-                            ) + result.history,
+                            "optimization_history": prior_history + result.history,
                             # The saved delta is float16, so the continued
                             # trajectory can differ from an uninterrupted
                             # run in the last bits of the starting point.
@@ -917,7 +1032,7 @@ for source_dataset in SOURCE_DATASETS:
                         }
                         torch.save({"delta": delta.half(), "metadata": metadata}, pt_path)
                         for steps, (budget, root) in snapshot_budgets.items():
-                            captured = result.snapshots.get(steps)
+                            captured = snapshots.get(steps)
                             if captured is None:
                                 continue
                             start_snapshot_generation_config(
