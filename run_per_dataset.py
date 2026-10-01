@@ -284,6 +284,13 @@ TRANSFER_SETTINGS = csv_tuple("DATASET_TRANSFER_SETTINGS", "same_dataset,cross_d
 if not TRANSFER_SETTINGS or not set(TRANSFER_SETTINGS) <= {"same_dataset", "cross_dataset"}:
     raise ValueError(f"Unexpected DATASET_TRANSFER_SETTINGS: {TRANSFER_SETTINGS}")
 SOURCE_DATASETS = source_datasets()
+# Optimize only these of SOURCE_DATASETS. The protocol split still spans every
+# source dataset, so a run divided by dataset across machines writes the same
+# split, and the same protocol_split_sha256, as one run over all of them.
+# Empty or unset (train.sh exports it empty) means all of them.
+OPTIMIZE_DATASETS = csv_tuple("OPTIMIZE_DATASETS", "") or SOURCE_DATASETS
+if not set(OPTIMIZE_DATASETS) <= set(SOURCE_DATASETS):
+    raise ValueError(f"OPTIMIZE_DATASETS {OPTIMIZE_DATASETS} must be a subset of {SOURCE_DATASETS}")
 EVALUATION_DATASETS = evaluation_datasets()
 PROTOCOL_DATASETS = protocol_datasets()
 DISCOVERY_MODE = PROTOCOL_DATASETS[0] if len(PROTOCOL_DATASETS) == 1 else "both"
@@ -323,10 +330,10 @@ print("Protocol SHA256:", split_sha256())
 print("Attack-train fractions:", TRAIN_FRACTIONS)
 print("Loss formulation:", LOSS_FORMULATION)
 print("Prompt mode:", PROMPT_MODE)
-print("Source datasets:", SOURCE_DATASETS)
+print("Source datasets:", SOURCE_DATASETS, "| optimized here:", OPTIMIZE_DATASETS)
 print("Transfer settings:", TRANSFER_SETTINGS)
 print("Evaluation datasets:", EVALUATION_DATASETS)
-print("Expected optimization runs:", len(SOURCE_DATASETS) * len(TRAIN_FRACTIONS) * len(DIRECTIONS) * len(LOSS_MODES))
+print("Expected optimization runs:", len(OPTIMIZE_DATASETS) * len(TRAIN_FRACTIONS) * len(DIRECTIONS) * len(LOSS_MODES))
 print("Important: each source delta is optimized once and referenced by every evaluation dataset.")
 
 all_discovered = discover_anomaly_datasets(
@@ -670,7 +677,7 @@ start_generation_configs(
     overwrite=OVERWRITE_EXISTING,
 )
 
-for source_dataset in SOURCE_DATASETS:
+for source_dataset in OPTIMIZE_DATASETS:
     categories = sorted({s.category for s in samples if s.dataset == source_dataset})
     prompt_checkpoint = learnable_prompt_checkpoint(source_dataset, PROMPT_MODE)
     print(f"\n===== SOURCE {source_dataset}: {PROMPT_MODE} =====")
@@ -1334,5 +1341,5 @@ finish_running_generation_configs()
 print("\nPer-dataset optimization artifacts:", len(artifact_rows))
 print(
     "Expected optimizations:",
-    len(SOURCE_DATASETS) * len(TRAIN_FRACTIONS) * len(DIRECTIONS) * len(LOSS_MODES),
+    len(OPTIMIZE_DATASETS) * len(TRAIN_FRACTIONS) * len(DIRECTIONS) * len(LOSS_MODES),
 )

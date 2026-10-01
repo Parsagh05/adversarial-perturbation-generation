@@ -584,7 +584,7 @@ EXECUTION_SETTINGS = frozenset({
     # Where a continued run started from; each delta records it as
     # continued_from. The deadline and its checkpoints only split one run
     # across sessions.
-    "CONTINUE_FROM", "CONTINUE_REQUIRED", "GENERATION_DEADLINE",
+    "CONTINUE_FROM", "CONTINUE_REQUIRED", "GENERATION_DEADLINE", "OPTIMIZE_DATASETS",
     "GENERATION_CHECKPOINT_DIR", "DEADLINE_EXIT_CODE", "DEADLINE_START_MARGIN_SECONDS",
 })
 # Read through an f-string in adversarial_harness/prompts.py, so the source

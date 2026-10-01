@@ -177,6 +177,10 @@ SNAPSHOT_EPOCHS="${SNAPSHOT_EPOCHS:-}"
 # only with momentum off, a constant step size and final checkpoint selection.
 #   CONTINUE_FROM=/runs/pgd_b64_mb8_ep20/ep20/setups FINAL_EPOCHS=40
 CONTINUE_FROM="${CONTINUE_FROM:-}"
+# Optimize only these source datasets (per_dataset scope), e.g. "mvtec" on one
+# machine and "visa" on another. Unlike narrowing SOURCE_DATASETS, the protocol
+# split is unchanged, so the parts merge into one run. Empty: all of them.
+OPTIMIZE_DATASETS="${OPTIMIZE_DATASETS:-}"
 # true: stop with an error instead of training a delta from scratch when
 # CONTINUE_FROM holds no matching shorter run of it.
 CONTINUE_REQUIRED="${CONTINUE_REQUIRED:-false}"

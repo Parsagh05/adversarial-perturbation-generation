@@ -10,7 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 class DatasetRoutingContractTests(unittest.TestCase):
     def test_per_dataset_separates_optimization_and_delivery_loops(self) -> None:
         script = (ROOT / "run_per_dataset.py").read_text(encoding="utf-8")
-        self.assertIn("for source_dataset in SOURCE_DATASETS:", script)
+        # OPTIMIZE_DATASETS is SOURCE_DATASETS unless narrowed to a subset of it.
+        self.assertIn("for source_dataset in OPTIMIZE_DATASETS:", script)
+        self.assertIn('OPTIMIZE_DATASETS = csv_tuple("OPTIMIZE_DATASETS", "") or SOURCE_DATASETS', script)
         self.assertIn("for target_dataset in EVALUATION_DATASETS:", script)
         self.assertIn(
             'if any(sample.dataset != source_dataset for sample in source_train):',
