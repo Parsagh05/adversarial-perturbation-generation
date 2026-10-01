@@ -182,6 +182,15 @@ SEED = int(os.environ.get("ATTACK_SEED", "111"))
 OVERWRITE_EXISTING = bool_env("OVERWRITE_EXISTING", False)
 # Skip PGD and write a +/- epsilon random-sign delta: the unoptimised control.
 RANDOM_BASELINE = bool_env("RANDOM_BASELINE", False)
+# A folder holding an earlier, shorter run of this setup (its setups/ tree, or
+# any part of it). Each delta starts from the longest matching shorter delta
+# found there and trains only the remaining steps. Empty starts from scratch.
+CONTINUE_FROM = os.environ.get("CONTINUE_FROM", "").strip()
+if CONTINUE_FROM:
+    if RANDOM_BASELINE:
+        raise SystemExit("RANDOM_BASELINE has no optimisation to continue; unset CONTINUE_FROM")
+    if not Path(CONTINUE_FROM).expanduser().is_dir():
+        raise FileNotFoundError(f"CONTINUE_FROM is not a folder: {CONTINUE_FROM}")
 # What actually ran, recorded in generation_config.json. The random baseline
 # never optimises, so it ignores OPTIMIZER.
 OPTIMIZER_USED = (
@@ -449,6 +458,47 @@ def write_snapshot_artifact(
     print(f"[snapshot] {snapshot_epochs} epochs -> {path}")
 
 
+# Where the budget lives, plus provenance: a continuation may run newer code
+# than the delta it extends. Every other recorded setting must match.
+CONTINUATION_IGNORED = frozenset({
+    "optimization_epochs", "universal_steps", "benchmark_commit",
+    "anomalyclip_loader_commit", "generator_script_sha256", "attack_code_sha256",
+})
+
+
+def continuation_source(pt_name: str, expected: Dict):
+    """``(steps, path, payload)`` of the longest shorter run of this delta.
+
+    Searched for under CONTINUE_FROM by file name, then matched on the
+    recorded settings, so the folder layout and setup ID do not matter.
+    """
+
+    best, rejected = None, []
+    for path in sorted(Path(CONTINUE_FROM).expanduser().resolve().rglob(pt_name)):
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        metadata = payload.get("metadata", {})
+        steps = int(metadata.get("universal_steps", 0))
+        if not 0 < steps < expected["universal_steps"]:
+            continue
+        if metadata.get("delta_source", "optimized") != "optimized":
+            continue
+        differing = [
+            key for key, value in expected.items()
+            if key not in CONTINUATION_IGNORED and metadata.get(key) != value
+        ]
+        if differing:
+            rejected.append((path, differing))
+            continue
+        if best is None or steps > best[0]:
+            best = (steps, path, payload)
+    # Say why a shorter run was passed over, so a setting that changed since
+    # (new prompts, say) does not silently cost a full run from scratch.
+    if best is None:
+        for path, differing in rejected[:3]:
+            print(f"[continue] not used, settings differ ({', '.join(differing)}): {path}")
+    return best
+
+
 def reusable(pt_path: Path, expected: Dict) -> bool:
     if OVERWRITE_EXISTING or not pt_path.is_file():
         return False
@@ -711,10 +761,25 @@ for source_dataset in SOURCE_DATASETS:
                             f"[generate] source={source_dataset} fraction={fraction:.2f} "
                             f"direction={direction} loss={loss_mode} train={len(source_train)}"
                         )
+                        continuation = (
+                            continuation_source(pt_path.name, expected)
+                            if CONTINUE_FROM else None
+                        )
+                        start_step = continuation[0] if continuation else 0
+                        if continuation:
+                            print(
+                                f"[continue] from step {start_step}/{condition_steps} "
+                                f"({continuation[2]['metadata']['optimization_epochs']} epochs): "
+                                f"{continuation[1]}"
+                            )
+                        elif CONTINUE_FROM:
+                            print("[continue] no shorter run of this delta found; training from scratch")
                         run_seed = condition_seed(SEED, source_dataset, fraction, direction, loss_mode)
                         seed_everything(run_seed)
                         attacker = TargetedPGD(surrogate, condition_config)
-                        bar = tqdm(total=condition_steps, desc="PGD", unit="step")
+                        bar = tqdm(
+                            total=condition_steps, initial=start_step, desc="PGD", unit="step"
+                        )
 
                         def progress(step, total, metrics):
                             bar.update(step - bar.n)
@@ -755,6 +820,11 @@ for source_dataset in SOURCE_DATASETS:
                                     progress=progress,
                                     snapshot_steps=tuple(snapshot_budgets),
                                     micro_batch_size=MICRO_BATCH_SIZE,
+                                    initial_delta=(
+                                        continuation[2]["delta"].float()
+                                        if continuation else None
+                                    ),
+                                    start_step=start_step,
                                 )
                         bar.close()
                         delta = result.delta.detach().cpu().float()
@@ -806,7 +876,22 @@ for source_dataset in SOURCE_DATASETS:
                                 for key in result.initial_losses
                                 if key in result.final_losses
                             },
-                            "optimization_history": result.history,
+                            # A continuation's own history starts after the
+                            # steps it took over; prepend theirs.
+                            "optimization_history": (
+                                continuation[2]["metadata"].get("optimization_history", [])
+                                if continuation else []
+                            ) + result.history,
+                            # The saved delta is float16, so the continued
+                            # trajectory can differ from an uninterrupted
+                            # run in the last bits of the starting point.
+                            **({"continued_from": {
+                                "path": str(continuation[1]),
+                                "optimization_epochs": continuation[2]["metadata"]["optimization_epochs"],
+                                "universal_steps": start_step,
+                                "delta_sha256_float32": continuation[2]["metadata"].get("delta_sha256_float32"),
+                                "delta_precision": str(continuation[2]["delta"].dtype).replace("torch.", ""),
+                            }} if continuation else {}),
                             "selected_step": result.selected_step,
                             "selected_diagnostic_loss": result.selected_diagnostic_loss,
                             "actual_linf": actual_linf,

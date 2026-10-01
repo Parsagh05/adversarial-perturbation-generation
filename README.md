@@ -903,6 +903,35 @@ It covers `per_dataset` and `cross_dataset` only; `run_per_category.py` and
 `run_per_image.py` refuse to start with it set, and it cannot be combined with
 `SNAPSHOT_EPOCHS`.
 
+## Continuing a shorter run
+
+`CONTINUE_FROM` points at an earlier run's `setups/` folder, or any part of it.
+Each delta then starts from the longest matching shorter delta found there and
+trains only the remaining steps, so a finished 20-epoch run becomes a 40-epoch
+run for the cost of 20 more epochs:
+
+```bash
+CONTINUE_FROM=/runs/pgd_b64_mb8_ep20/ep20/setups FINAL_EPOCHS=40 bash train.sh
+```
+
+A match is found by file name and then by the recorded settings: everything
+in the delta's metadata except the epoch and step count and the code
+provenance must equal the new run's (dataset, direction, loss, prompts, batch
+size, epsilon, optimizer, seed, split, ...). A delta with no match trains from
+scratch and says so. The new delta records `continued_from`, and its
+`optimization_history` holds the earlier steps followed by the new ones.
+
+The batch order of the skipped steps is replayed without any forward pass, so
+the continuation takes the steps an uninterrupted run would have taken. With
+the float32 delta this is byte-identical to the uninterrupted run (tested). The
+deltas on disk are float16, so a continuation from them starts within float16
+rounding of that point and can drift from it slightly. It needs everything
+else the trajectory carries to be recoverable from the delta alone, so it is
+refused with momentum on, a decaying step size or `CHECKPOINT_SELECTION=best`.
+Snapshots work as usual for budgets past the starting point. `per_dataset` and
+`cross_dataset` only; `run_per_category.py` and `run_per_image.py` refuse to
+start with it set.
+
 ## Outputs
 
 Outputs are grouped by everything that shapes the attack except how long it

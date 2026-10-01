@@ -909,6 +909,80 @@ class SnapshotEquivalenceTests(unittest.TestCase):
         self.assertEqual(self._run(5, "final").snapshots, {})
 
 
+class _PixelwiseFakeSurrogate(_FakeSurrogate):
+    """Each image pulls each pixel its own way, so the batch order matters."""
+
+    def encode_visual(self, images_01, include_patches=True):
+        signal = ((images_01 - 0.5) ** 2).mean(dim=(1, 2, 3)).mul(4.0).clamp(0.0, 1.0)
+        token = torch.stack((1.0 - signal, signal), dim=-1)
+        cls = token[:, None, :]
+        patches = token[:, None, :].expand(-1, 4, -1)
+        return token, [torch.cat((cls, patches), dim=1)] if include_patches else []
+
+
+class ContinuationEquivalenceTests(unittest.TestCase):
+    """Continuing from a shorter run's delta must equal the uninterrupted run."""
+
+    def _run(self, steps, optimizer="pgd", start=None, **overrides):
+        torch.manual_seed(1234)
+        config = dict(
+            temperature=1.0,
+            image_size=2,
+            epsilon=0.2,
+            step_size=0.05,
+            universal_steps=steps,
+            universal_batch_size=2,
+            diagnostic_interval=3,
+            seed=11,
+            random_start=True,
+            step_size_schedule="constant",
+            checkpoint_selection="final",
+            optimizer=optimizer,
+            sga_inner_batch_size=1,
+            sga_inner_passes=2,
+        )
+        config.update(overrides)
+        attacker = TargetedPGD(_PixelwiseFakeSurrogate(), AttackConfig(**config))
+        return attacker.optimize_universal(
+            [_Sample("object", value) for value in (0.1, 0.3, 0.5, 0.7, 0.9)],
+            lambda s: (torch.arange(12.0).reshape(3, 2, 2) * s.value * 0.37) % 1.0,
+            target_label=1,
+            mode="global",
+            initial_delta=None if start is None else start[1],
+            start_step=0 if start is None else start[0],
+        )
+
+    def test_a_continued_run_equals_the_uninterrupted_run(self) -> None:
+        # 5 images at batch 2 make a short final batch, so the replay has to
+        # cross epoch boundaries and reshuffles at the same points.
+        for optimizer in ("pgd", "sga"):
+            for done in (3, 4, 7):
+                with self.subTest(optimizer=optimizer, done=done):
+                    full = self._run(12, optimizer)
+                    first = self._run(done, optimizer)
+                    continued = self._run(12, optimizer, start=(done, first.delta))
+                    self.assertEqual(
+                        _delta_sha256(full.delta), _delta_sha256(continued.delta)
+                    )
+                    self.assertEqual(
+                        [row["step"] for row in continued.history],
+                        [float(step) for step in range(done + 1, 13)],
+                    )
+
+    def test_settings_the_delta_cannot_carry_are_refused(self) -> None:
+        first = self._run(4)
+        for overrides in (
+            {"momentum_decay": 0.9},
+            {"step_size_schedule": "linear"},
+            {"checkpoint_selection": "best"},
+        ):
+            with self.subTest(**overrides):
+                with self.assertRaises(ValueError):
+                    self._run(12, start=(4, first.delta), **overrides)
+        with self.assertRaises(ValueError):
+            self._run(4, start=(4, first.delta))
+
+
 class PerImageSnapshotEquivalenceTests(unittest.TestCase):
     """A per-image snapshot must equal a standalone shorter per-image run."""
 

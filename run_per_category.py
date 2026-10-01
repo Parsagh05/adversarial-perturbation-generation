@@ -28,6 +28,8 @@ from tqdm import tqdm
 # Better to fail loudly than to write optimised deltas under a _random name.
 if os.environ.get("RANDOM_BASELINE", "false").strip().lower() in {"1", "true", "yes", "on"}:
     raise SystemExit(f"RANDOM_BASELINE is implemented for run_per_dataset.py only, not {os.path.basename(__file__)}")
+if os.environ.get("CONTINUE_FROM", "").strip():
+    raise SystemExit(f"CONTINUE_FROM is implemented for run_per_dataset.py only, not {os.path.basename(__file__)}")
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 if not torch.cuda.is_available():

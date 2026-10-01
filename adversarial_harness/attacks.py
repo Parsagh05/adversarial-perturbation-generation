@@ -664,6 +664,8 @@ class TargetedPGD:
         progress: Callable[[int, int, Dict[str, float]], None] | None = None,
         snapshot_steps: Sequence[int] = (),
         micro_batch_size: int = 0,
+        initial_delta: Optional[torch.Tensor] = None,
+        start_step: int = 0,
     ) -> UniversalAttackResult:
         """Optimize one shared perturbation across the supplied samples.
 
@@ -677,11 +679,33 @@ class TargetedPGD:
         equivalent to a standalone shorter run while the step size is
         independent of the total budget, which ``constant`` guarantees and the
         decaying schedules do not.
+
+        ``initial_delta`` with ``start_step`` continues a run that stopped after
+        ``start_step`` updates and returned ``initial_delta``. The batch order
+        of the skipped steps is replayed without any forward pass, so the
+        continuation takes the steps the uninterrupted run would have taken.
+        That needs everything else the trajectory carries to be recoverable from
+        the delta alone: no momentum, a constant step, and the final iterate.
+        The history and snapshots cover the continued steps only.
         """
 
+        if start_step:
+            if not 0 < start_step < self.config.universal_steps or initial_delta is None:
+                raise ValueError(
+                    "start_step must lie inside the budget and needs initial_delta"
+                )
+            if (
+                self.config.momentum_decay > 0.0
+                or self.config.step_size_schedule != "constant"
+                or self.config.checkpoint_selection != "final"
+            ):
+                raise ValueError(
+                    "A run can only be continued from its delta with momentum off, "
+                    "a constant step size and final checkpoint selection"
+                )
         wanted_snapshots = {
             int(step) for step in snapshot_steps
-            if 0 < int(step) < self.config.universal_steps
+            if start_step < int(step) < self.config.universal_steps
         }
         snapshots: Dict[int, torch.Tensor] = {}
 
@@ -690,6 +714,9 @@ class TargetedPGD:
         size = self.config.image_size
         reference = image_loader(samples[0]).unsqueeze(0).to(self.device)
         delta = self._initial_delta((1, 3, size, size), reference)
+        if start_step:
+            delta = initial_delta.to(self.device, dtype=delta.dtype).reshape(delta.shape)
+            delta = delta.clamp(-self.config.epsilon, self.config.epsilon).detach()
         # Starts at zero and evolves deterministically from the step index, so
         # the first N steps of a long run stay identical to an N-step run.
         momentum = torch.zeros_like(delta)
@@ -727,7 +754,8 @@ class TargetedPGD:
         best_diagnostic_loss = initial_losses["total"]
         selected_step = 0
 
-        for step in range(self.config.universal_steps):
+        def next_indices():
+            nonlocal cursor
             batch_size = min(self.config.universal_batch_size, len(samples))
             if cursor >= len(order):
                 self.rng.shuffle(order)
@@ -738,6 +766,20 @@ class TargetedPGD:
             stop = min(cursor + batch_size, len(order))
             indices = order[cursor:stop]
             cursor = stop
+            return indices
+
+        # Replay the random draws of the steps already taken, in the order the
+        # loop below makes them, so a continuation sees the same batches.
+        for _ in range(start_step):
+            replayed = next_indices()
+            if self.config.optimizer == "sga":
+                sga_inner_batches(
+                    len(replayed), self.config.sga_inner_batch_size,
+                    self.config.sga_inner_passes, self.rng,
+                )
+
+        for step in range(start_step, self.config.universal_steps):
+            indices = next_indices()
             batch_samples = [samples[int(index)] for index in indices]
             clean = torch.stack([image_loader(sample) for sample in batch_samples]).to(
                 self.device

@@ -15,6 +15,7 @@ export FULL_DATA_CROSS="${FULL_DATA_CROSS:-true}"
 export MARGIN_HINGE_DISPLACEMENT="${MARGIN_HINGE_DISPLACEMENT:-}"
 export MOMENTUM_DECAY="${MOMENTUM_DECAY:-}"
 export RANDOM_BASELINE="${RANDOM_BASELINE:-false}"
+export CONTINUE_FROM="${CONTINUE_FROM:-}"
 # pgd (default) or sga; see setup_catalog.optimizer_setting.
 export OPTIMIZER="${OPTIMIZER:-pgd}"
 export SGA_INNER_BATCH_SIZE="${SGA_INNER_BATCH_SIZE:-2}"

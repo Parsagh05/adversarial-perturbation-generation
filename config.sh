@@ -168,6 +168,15 @@ CHECKPOINT_SELECTION="${CHECKPOINT_SELECTION:-final}"
 #   SETUP_EPOCHS="20:400:400" SNAPSHOT_EPOCHS="5:100:100,10:200:200"
 #   -> ep5_cat100_img100_..., ep10_cat200_img200_..., plus the run's own
 SNAPSHOT_EPOCHS="${SNAPSHOT_EPOCHS:-}"
+
+# Continue from an earlier, shorter run instead of starting from scratch:
+# point it at that run's setups/ folder (or any part of it). Each delta starts
+# from the longest matching shorter delta found there - same settings, fewer
+# epochs - and trains only the remaining epochs up to SETUP_EPOCHS. Deltas
+# with no match train from scratch. per_dataset and cross_dataset only, and
+# only with momentum off, a constant step size and final checkpoint selection.
+#   CONTINUE_FROM=/runs/pgd_b64_mb8_ep20/ep20/setups FINAL_EPOCHS=40
+CONTINUE_FROM="${CONTINUE_FROM:-}"
 MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL="${MARGIN_TOPK_FRACTION_NORMAL_TO_ABNORMAL:-0.20}"
 MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL="${MARGIN_TOPK_FRACTION_ABNORMAL_TO_NORMAL:-0.40}"
 
