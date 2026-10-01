@@ -89,6 +89,24 @@ class TargetedPGD:
         self.config = config
         self.device = surrogate.device
         self.rng = np.random.default_rng(config.seed)
+        # Images per gradient forward when gradients are accumulated; set by
+        # optimize_universal. 0 means the configured batch is used whole.
+        self.forward_chunk = 0
+
+    def _forward_batch_size(self, count: int) -> int:
+        """Images per no-grad forward (diagnostics, hinge floors).
+
+        Never more than one training forward holds - SGA's inner batch or the
+        accumulation chunk - since the GPU is sized for that, not for the
+        whole outer batch. The losses are means of per-image terms, so the
+        chunking changes nothing but rounding.
+        """
+        size = self.config.universal_batch_size
+        if self.config.optimizer == "sga":
+            size = min(size, self.config.sga_inner_batch_size)
+        if self.forward_chunk > 0:
+            size = min(size, self.forward_chunk)
+        return max(1, min(size, count))
 
     def _group_losses(
         self,
@@ -398,7 +416,7 @@ class TargetedPGD:
         if displacement is None or self.config.loss_formulation != "margin_topk":
             return None
         direction_sign = -1.0 if target_label == 1 else 1.0
-        batch_size = max(1, min(self.config.universal_batch_size, len(samples)))
+        batch_size = self._forward_batch_size(len(samples))
         clean_global = []
         clean_local = []
         with torch.no_grad():
@@ -673,10 +691,12 @@ class TargetedPGD:
     ) -> UniversalAttackResult:
         """Optimize one shared perturbation across the supplied samples.
 
-        ``micro_batch_size`` (pgd only; 0 = off) splits each batch into chunks
-        whose gradients are accumulated before the single sign step. The loss is
-        a mean of independent per-image terms, so the gradient is the batch's
-        own up to rounding; only the memory differs.
+        ``micro_batch_size`` (0 = off) splits each gradient forward into chunks
+        whose gradients are accumulated: PGD's batch before its sign step, and
+        each of SGA's inner batches before its inner step. The loss is a mean
+        of independent per-image terms, so the gradient is the batch's own up
+        to rounding; only the memory differs. Diagnostics then run in chunks of
+        the same size.
 
         ``snapshot_steps`` captures, at each listed step, the delta this run
         would have returned had it been configured to stop there. That is only
@@ -720,6 +740,7 @@ class TargetedPGD:
 
         if not samples:
             raise ValueError("Universal optimization requires at least one sample")
+        self.forward_chunk = micro_batch_size if micro_batch_size > 0 else 0
         size = self.config.image_size
         reference = image_loader(samples[0]).unsqueeze(0).to(self.device)
         delta = self._initial_delta((1, 3, size, size), reference)
@@ -882,9 +903,27 @@ class TargetedPGD:
                     len(batch_samples), self.config.sga_inner_batch_size,
                     self.config.sga_inner_passes, self.rng,
                 ):
-                    inner, part_global, part_local, loss = batch_gradient(
-                        inner_delta, positions
-                    )
+                    if 0 < micro_batch_size < len(positions):
+                        # Accumulated over chunks, weighted by their share of
+                        # the inner batch: the inner batch's mean gradient.
+                        inner = torch.zeros_like(delta)
+                        part_global = torch.zeros_like(delta) if mode != "local" else None
+                        part_local = torch.zeros_like(delta) if mode != "global" else None
+                        loss = 0.0
+                        for start in range(0, len(positions), micro_batch_size):
+                            chunk = positions[start:start + micro_batch_size]
+                            weight = len(chunk) / len(positions)
+                            g, g_global, g_local, chunk_loss = batch_gradient(inner_delta, chunk)
+                            inner = inner + weight * g
+                            if part_global is not None:
+                                part_global = part_global + weight * g_global
+                            if part_local is not None:
+                                part_local = part_local + weight * g_local
+                            loss += weight * chunk_loss
+                    else:
+                        inner, part_global, part_local, loss = batch_gradient(
+                            inner_delta, positions
+                        )
                     inner_delta = (inner_delta - step_size * inner.sign()).clamp(
                         -self.config.epsilon, self.config.epsilon
                     ).detach()
@@ -934,14 +973,32 @@ class TargetedPGD:
             delta = delta.clamp(-self.config.epsilon, self.config.epsilon)
             delta = delta.detach()
             with torch.no_grad():
-                updated_components = self.objective_components(
-                    (clean + delta).clamp(0.0, 1.0),
-                    categories,
-                    target_label,
-                    mode,
-                    spatial_masks=spatial_masks,
-                    hinge_floors=batch_floors,
-                )
+                # The post-update batch loss, in forwards no larger than a
+                # training one; every component is a per-image mean or
+                # fraction, so the share-weighted sum is the batch's value.
+                updated_components = {}
+                chunk_size = self._forward_batch_size(len(batch_samples))
+                for start in range(0, len(batch_samples), chunk_size):
+                    rows = torch.arange(
+                        start, min(start + chunk_size, len(batch_samples)), device=self.device
+                    )
+                    weight = len(rows) / len(batch_samples)
+                    part = self.objective_components(
+                        (clean.index_select(0, rows) + delta).clamp(0.0, 1.0),
+                        [categories[i] for i in rows.tolist()],
+                        target_label,
+                        mode,
+                        spatial_masks=(
+                            None if spatial_masks is None
+                            else spatial_masks.index_select(0, rows)
+                        ),
+                        hinge_floors=(
+                            None if batch_floors is None
+                            else {k: v.index_select(0, rows) for k, v in batch_floors.items()}
+                        ),
+                    )
+                    for key, value in part.items():
+                        updated_components[key] = updated_components.get(key, 0.0) + weight * value
             diagnostic_losses: Dict[str, float] = {}
             if (
                 step == 0
@@ -1131,7 +1188,7 @@ class TargetedPGD:
 
         totals: Dict[str, float] = {}
         counts: Dict[str, int] = {}
-        batch_size = min(self.config.universal_batch_size, len(samples))
+        batch_size = self._forward_batch_size(len(samples))
         with torch.no_grad():
             for start in range(0, len(samples), batch_size):
                 batch_samples = samples[start : start + batch_size]
