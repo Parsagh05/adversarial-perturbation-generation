@@ -354,7 +354,11 @@ while IFS=$'\x1f' read -r id epochs cross_epochs category_epochs image_epochs ep
 done <<< "$SETUP_TABLE"
 
 "$PYTHON" "$ROOT/audit_generation.py"
-export PIPELINE_OUTPUT
-"$PYTHON" "$ROOT/package_full_outputs.py"
 echo "Done. Results are in: $PIPELINE_OUTPUT/setups"
-echo "Combined archive: $PIPELINE_OUTPUT/full_outputs.zip"
+# The combined archive duplicates everything under setups/ and nothing reads
+# it, so it is opt-in: WRITE_FULL_OUTPUT_ARCHIVE=true to ship a run as one file.
+if [[ "${WRITE_FULL_OUTPUT_ARCHIVE:-false}" == "true" ]]; then
+  export PIPELINE_OUTPUT
+  "$PYTHON" "$ROOT/package_full_outputs.py"
+  echo "Combined archive: $PIPELINE_OUTPUT/full_outputs.zip"
+fi
